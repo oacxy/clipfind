@@ -18,10 +18,19 @@ note in DEPLOY.md about sandboxed environments that block that).
 import os
 import uuid
 import shutil
+import functools
 import subprocess
 import tempfile
 
+import stripe
 from flask import Flask, request, jsonify, render_template_string, send_from_directory
+from flask_login import (
+    LoginManager,
+    login_user,
+    logout_user,
+    login_required,
+    current_user,
+)
 
 from clipfind import (
     fetch_youtube_transcript,
@@ -31,12 +40,57 @@ from clipfind import (
     fmt_timestamp,
     parse_timestamp,
 )
+from models import db, User, FREE_DAILY_LIMIT, PAID_MAX_CLIP_SECONDS
 
 app = Flask(__name__)
 
 DEMO_TRANSCRIPT_PATH = "sample_transcript.txt"
 CLIPS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clips_output")
 os.makedirs(CLIPS_DIR, exist_ok=True)
+
+# --- Database ---------------------------------------------------------
+# DATABASE_URL is provided automatically by Render's Postgres add-on.
+# Falls back to a local SQLite file so this runs with zero setup locally.
+db_url = os.environ.get("DATABASE_URL", "sqlite:///clipfind.db")
+# Render (like Heroku) hands out "postgres://" but SQLAlchemy 1.4+ wants "postgresql://"
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.secret_key = os.environ.get("SECRET_KEY", "dev-only-insecure-key-set-SECRET_KEY-in-prod")
+db.init_app(app)
+
+with app.app_context():
+    db.create_all()
+
+# --- Auth ---------------------------------------------------------------
+login_manager = LoginManager()
+login_manager.init_app(app)
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
+
+
+def json_login_required(view):
+    """Like flask_login's @login_required, but returns a JSON 401 instead
+    of redirecting to a login page — this app has no server-rendered login
+    page, it's all API calls from the single-page frontend."""
+
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if not current_user.is_authenticated:
+            return jsonify({"error": "Sign in first.", "auth_required": True}), 401
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+# --- Stripe ---------------------------------------------------------------
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 
 def clips_to_json(clips):
@@ -83,15 +137,29 @@ def _to_seconds(value):
     return parse_timestamp(str(value))
 
 
-def cut_youtube_clip(youtube_url: str, start_seconds: float, end_seconds: float) -> str:
+def cut_youtube_clip(
+    youtube_url: str,
+    start_seconds: float,
+    end_seconds: float,
+    max_seconds: int = 90,
+    max_height: int = 480,
+) -> str:
     """Download just the needed section of a YouTube video with yt-dlp,
     trim it precisely with ffmpeg, and return the filename (inside
     CLIPS_DIR) of the resulting mp4. Raises RuntimeError with a message
-    safe to show the user on failure."""
+    safe to show the user on failure.
+
+    max_seconds/max_height are tier-gated by the caller (free vs paid) —
+    free users get shorter, lower-res clips since actual video download
+    is the real Webshare-bandwidth cost, unlike text-only transcript
+    fetches."""
     if end_seconds <= start_seconds:
         raise RuntimeError("End must be after start.")
-    if end_seconds - start_seconds > 180:
-        raise RuntimeError("Clips longer than 3 minutes aren't supported yet.")
+    if end_seconds - start_seconds > max_seconds:
+        raise RuntimeError(
+            f"Clips longer than {max_seconds} seconds aren't available on your plan "
+            f"{'yet' if max_seconds >= PAID_MAX_CLIP_SECONDS else '— upgrade for longer clips'}."
+        )
 
     if shutil.which("ffmpeg") is None:
         raise RuntimeError(
@@ -113,7 +181,7 @@ def cut_youtube_clip(youtube_url: str, start_seconds: float, end_seconds: float)
     section_end = end_seconds + pad
 
     ydl_opts = {
-        "format": "mp4[height<=720]/mp4/best",
+        "format": f"mp4[height<={max_height}]/mp4/best",
         "outtmpl": raw_template,
         "download_ranges": yt_dlp.utils.download_range_func(None, [(section_start, section_end)]),
         "force_keyframes_at_cuts": True,
@@ -167,7 +235,127 @@ def cut_youtube_clip(youtube_url: str, start_seconds: float, end_seconds: float)
     return f"{clip_id}.mp4"
 
 
+@app.route("/api/auth", methods=["POST"])
+def auth():
+    """Single endpoint for both signup and login, to keep the frontend to
+    one form/button: if the email exists, this logs in (checking the
+    password); if it doesn't, this creates the account. Keeps the UI to
+    one input pair instead of separate signup/login screens."""
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+
+    if not email or "@" not in email:
+        return jsonify({"error": "Enter a valid email."}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password needs to be at least 6 characters."}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if user:
+        if not user.check_password(password):
+            return jsonify({"error": "Wrong password for that email."}), 401
+    else:
+        user = User(email=email)
+        user.set_password(password)
+        db.session.add(user)
+        db.session.commit()
+
+    login_user(user, remember=True)
+    return jsonify(_user_status(user))
+
+
+@app.route("/api/logout", methods=["POST"])
+@json_login_required
+def logout():
+    logout_user()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/me", methods=["GET"])
+def me():
+    if not current_user.is_authenticated:
+        return jsonify({"logged_in": False})
+    return jsonify(_user_status(current_user))
+
+
+def _user_status(user):
+    return {
+        "logged_in": True,
+        "email": user.email,
+        "is_paid": user.is_paid,
+        "remaining_today": user.remaining_today("analyze"),
+        "remaining_cuts_today": user.remaining_today("cut"),
+        "free_daily_limit": FREE_DAILY_LIMIT,
+        "max_clip_seconds": user.max_clip_seconds(),
+    }
+
+
+@app.route("/api/create-checkout-session", methods=["POST"])
+@json_login_required
+def create_checkout_session():
+    if not stripe.api_key or not STRIPE_PRICE_ID:
+        return jsonify({"error": "Billing isn't configured yet on this server."}), 500
+
+    base_url = request.host_url.rstrip("/")
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            payment_method_types=["card"],
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            customer_email=current_user.email,
+            client_reference_id=str(current_user.id),
+            success_url=f"{base_url}/?checkout=success",
+            cancel_url=f"{base_url}/?checkout=cancelled",
+        )
+    except Exception as e:
+        return jsonify({"error": f"Couldn't start checkout: {e}"}), 502
+
+    return jsonify({"checkout_url": session.url})
+
+
+@app.route("/webhook/stripe", methods=["POST"])
+def stripe_webhook():
+    payload = request.data
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    try:
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        else:
+            # No webhook secret configured (e.g. still testing) — trust the payload as-is.
+            import json as _json
+            event = _json.loads(payload)
+    except Exception as e:
+        return jsonify({"error": f"Invalid webhook payload: {e}"}), 400
+
+    event_type = event["type"] if isinstance(event, dict) else event.type
+    data_object = event["data"]["object"] if isinstance(event, dict) else event.data.object
+
+    if event_type == "checkout.session.completed":
+        user_id = data_object.get("client_reference_id")
+        customer_id = data_object.get("customer")
+        subscription_id = data_object.get("subscription")
+        if user_id:
+            user = db.session.get(User, int(user_id))
+            if user:
+                user.is_paid = True
+                user.stripe_customer_id = customer_id
+                user.stripe_subscription_id = subscription_id
+                db.session.commit()
+
+    elif event_type in ("customer.subscription.deleted", "customer.subscription.updated"):
+        status = data_object.get("status")
+        customer_id = data_object.get("customer")
+        user = User.query.filter_by(stripe_customer_id=customer_id).first()
+        if user:
+            user.is_paid = status in ("active", "trialing")
+            db.session.commit()
+
+    return jsonify({"received": True})
+
+
 @app.route("/api/analyze", methods=["POST"])
+@json_login_required
 def analyze():
     data = request.get_json(silent=True) or {}
     url = (data.get("youtube_url") or "").strip()
@@ -175,6 +363,14 @@ def analyze():
 
     if not url:
         return jsonify({"error": "Paste a YouTube URL first."}), 400
+
+    if not current_user.can_analyze():
+        return jsonify(
+            {
+                "error": f"You've used all {FREE_DAILY_LIMIT} free clips today. Upgrade for unlimited.",
+                "limit_reached": True,
+            }
+        ), 402
 
     try:
         lines = fetch_youtube_transcript(url)
@@ -199,10 +395,18 @@ def analyze():
 
     lines = score_transcript(lines)
     clips = build_clips(lines, top_n=top)
-    return jsonify({"clips": clips_to_json(clips), "source": "youtube"})
+    current_user.record_usage()
+    return jsonify(
+        {
+            "clips": clips_to_json(clips),
+            "source": "youtube",
+            "remaining_today": current_user.remaining_today(),
+        }
+    )
 
 
 @app.route("/api/cut", methods=["POST"])
+@json_login_required
 def cut():
     data = request.get_json(silent=True) or {}
     url = (data.get("youtube_url") or "").strip()
@@ -212,6 +416,14 @@ def cut():
     if not url or start is None or end is None:
         return jsonify({"error": "Need youtube_url, start, and end."}), 400
 
+    if not current_user.can_use("cut"):
+        return jsonify(
+            {
+                "error": f"You've used all {FREE_DAILY_LIMIT} free clip downloads today. Upgrade for unlimited.",
+                "limit_reached": True,
+            }
+        ), 402
+
     try:
         start_s = _to_seconds(start)
         end_s = _to_seconds(end)
@@ -219,11 +431,23 @@ def cut():
         return jsonify({"error": "Couldn't parse start/end time."}), 400
 
     try:
-        filename = cut_youtube_clip(url, start_s, end_s)
+        filename = cut_youtube_clip(
+            url,
+            start_s,
+            end_s,
+            max_seconds=current_user.max_clip_seconds(),
+            max_height=current_user.max_height(),
+        )
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
-    return jsonify({"clip_url": f"/clips/{filename}"})
+    current_user.record_usage("cut")
+    return jsonify(
+        {
+            "clip_url": f"/clips/{filename}",
+            "remaining_cuts_today": current_user.remaining_today("cut"),
+        }
+    )
 
 
 @app.route("/clips/<path:filename>")
@@ -288,12 +512,46 @@ INDEX_HTML = """
   .clip video{margin-top:12px;width:100%;border-radius:8px;display:block;}
   .clip .dl-link{font-size:0.82rem;color:var(--green);}
   .footer-note{margin-top:28px;text-align:center;color:var(--text-dim);font-size:0.8rem;}
+  .account-bar{display:flex;justify-content:space-between;align-items:center;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px 18px;margin-bottom:16px;font-size:0.85rem;flex-wrap:wrap;gap:10px;}
+  .account-bar .left{color:var(--text-dim);}
+  .account-bar .left b{color:var(--text);}
+  .account-bar .actions{display:flex;gap:8px;}
+  .account-bar button{padding:8px 14px;font-size:0.82rem;}
+  input[type=password]{
+    flex:1;min-width:160px;padding:14px 16px;border-radius:8px;border:1px solid var(--border);
+    background:#0d0d13;color:var(--text);font-size:0.95rem;
+  }
+  input[type=email]{
+    flex:1;min-width:220px;padding:14px 16px;border-radius:8px;border:1px solid var(--border);
+    background:#0d0d13;color:var(--text);font-size:0.95rem;
+  }
+  input[type=email]:focus, input[type=password]:focus{outline:none;border-color:var(--accent);}
+  .auth-note{margin-top:10px;font-size:0.8rem;color:var(--text-dim);}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="logo">Clip<span>Find</span></div>
   <div class="tag">Paste a YouTube link. Get the moments worth clipping.</div>
+
+  <div class="panel" id="authPanel">
+    <div class="row">
+      <input type="email" id="authEmail" placeholder="you@email.com" />
+      <input type="password" id="authPassword" placeholder="password (6+ characters)" />
+      <button id="authBtn">Continue</button>
+    </div>
+    <div class="status" id="authStatus"></div>
+    <div class="auth-note">New here? This creates your account. Already have one? This logs you in. 3 free clips a day, no card needed.</div>
+  </div>
+
+  <div class="account-bar" id="accountBar" style="display:none;">
+    <div class="left" id="accountInfo"></div>
+    <div class="actions">
+      <button id="upgradeBtn" style="display:none;">Upgrade — unlimited</button>
+      <button class="secondary" id="logoutBtn">Log out</button>
+    </div>
+  </div>
+
   <div class="panel">
     <div class="row">
       <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
@@ -313,7 +571,101 @@ const analyzeBtn = document.getElementById('analyzeBtn');
 const demoBtn = document.getElementById('demoBtn');
 const urlInput = document.getElementById('urlInput');
 
+const authPanel = document.getElementById('authPanel');
+const authEmail = document.getElementById('authEmail');
+const authPassword = document.getElementById('authPassword');
+const authBtn = document.getElementById('authBtn');
+const authStatus = document.getElementById('authStatus');
+const accountBar = document.getElementById('accountBar');
+const accountInfo = document.getElementById('accountInfo');
+const upgradeBtn = document.getElementById('upgradeBtn');
+const logoutBtn = document.getElementById('logoutBtn');
+
 let lastYoutubeUrl = null; // set when the results came from a real video, not the demo
+let session = { logged_in: false };
+
+function renderAccountUI() {
+  if (session.logged_in) {
+    authPanel.style.display = 'none';
+    accountBar.style.display = 'flex';
+    const remainingText = session.is_paid
+      ? 'Unlimited clips'
+      : `${session.remaining_today} analyses + ${session.remaining_cuts_today} downloads left today`;
+    accountInfo.innerHTML = `Signed in as <b>${session.email}</b> · ${remainingText}`;
+    upgradeBtn.style.display = session.is_paid ? 'none' : 'inline-block';
+  } else {
+    authPanel.style.display = 'block';
+    accountBar.style.display = 'none';
+  }
+}
+
+async function refreshSession() {
+  const res = await fetch('/api/me');
+  session = await res.json();
+  renderAccountUI();
+}
+
+authBtn.addEventListener('click', async () => {
+  const email = authEmail.value.trim();
+  const password = authPassword.value;
+  authStatus.className = 'status';
+  authStatus.textContent = 'Working...';
+  authBtn.disabled = true;
+  try {
+    const res = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      authStatus.className = 'status error';
+      authStatus.textContent = data.error || 'Could not sign in.';
+      return;
+    }
+    session = data;
+    authStatus.textContent = '';
+    authPassword.value = '';
+    renderAccountUI();
+  } catch (e) {
+    authStatus.className = 'status error';
+    authStatus.textContent = 'Network error.';
+  } finally {
+    authBtn.disabled = false;
+  }
+});
+
+logoutBtn.addEventListener('click', async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  session = { logged_in: false };
+  renderAccountUI();
+});
+
+upgradeBtn.addEventListener('click', async () => {
+  upgradeBtn.disabled = true;
+  upgradeBtn.textContent = 'Redirecting...';
+  try {
+    const res = await fetch('/api/create-checkout-session', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || 'Could not start checkout.');
+      upgradeBtn.disabled = false;
+      upgradeBtn.textContent = 'Upgrade — unlimited';
+      return;
+    }
+    window.location.href = data.checkout_url;
+  } catch (e) {
+    alert('Network error starting checkout.');
+    upgradeBtn.disabled = false;
+    upgradeBtn.textContent = 'Upgrade — unlimited';
+  }
+});
+
+if (new URLSearchParams(window.location.search).get('checkout') === 'success') {
+  statusEl.textContent = "Payment received — you're upgraded! (may take a few seconds to reflect below)";
+}
+
+refreshSession();
 
 async function cutClip(youtubeUrl, start, end, statusNode, videoWrap) {
   statusNode.className = 'cut-status';
@@ -327,7 +679,14 @@ async function cutClip(youtubeUrl, start, end, statusNode, videoWrap) {
     const data = await res.json();
     if (!res.ok) {
       statusNode.className = 'cut-status error';
-      statusNode.textContent = data.error || 'Could not cut that clip.';
+      if (data.auth_required) {
+        statusNode.textContent = 'Sign in above first.';
+      } else if (data.limit_reached) {
+        statusNode.textContent = data.error;
+        upgradeBtn.scrollIntoView({ behavior: 'smooth' });
+      } else {
+        statusNode.textContent = data.error || 'Could not cut that clip.';
+      }
       return;
     }
     statusNode.textContent = '';
@@ -335,6 +694,10 @@ async function cutClip(youtubeUrl, start, end, statusNode, videoWrap) {
       <video controls src="${data.clip_url}"></video>
       <a class="dl-link" href="${data.clip_url}" download>Download mp4</a>
     `;
+    if (typeof data.remaining_cuts_today !== 'undefined') {
+      session.remaining_cuts_today = data.remaining_cuts_today;
+      renderAccountUI();
+    }
   } catch (e) {
     statusNode.className = 'cut-status error';
     statusNode.textContent = 'Network error while cutting.';
@@ -390,13 +753,25 @@ async function run(endpoint, body) {
     const data = await res.json();
     if (!res.ok) {
       statusEl.className = 'status error';
-      statusEl.textContent = data.error || 'Something went wrong.';
+      if (data.auth_required) {
+        statusEl.textContent = 'Sign in above first (3 free clips a day, no card needed).';
+        authPanel.scrollIntoView({ behavior: 'smooth' });
+      } else if (data.limit_reached) {
+        statusEl.textContent = data.error;
+        upgradeBtn.scrollIntoView({ behavior: 'smooth' });
+      } else {
+        statusEl.textContent = data.error || 'Something went wrong.';
+      }
       return;
     }
     const isYoutube = data.source === 'youtube';
     lastYoutubeUrl = isYoutube ? (body && body.youtube_url) : null;
     statusEl.textContent = `${data.clips.length} clips found${data.source === 'demo' ? ' (demo transcript)' : ''}`;
     renderClips(data.clips, isYoutube);
+    if (typeof data.remaining_today !== 'undefined') {
+      session.remaining_today = data.remaining_today;
+      renderAccountUI();
+    }
   } catch (e) {
     statusEl.className = 'status error';
     statusEl.textContent = 'Network error — is the server running?';
@@ -406,6 +781,12 @@ async function run(endpoint, body) {
 }
 
 analyzeBtn.addEventListener('click', () => {
+  if (!session.logged_in) {
+    statusEl.className = 'status error';
+    statusEl.textContent = 'Sign in above first (3 free clips a day, no card needed).';
+    authPanel.scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
   const url = urlInput.value.trim();
   if (!url) { statusEl.className = 'status error'; statusEl.textContent = 'Paste a YouTube URL first.'; return; }
   run('/api/analyze', { youtube_url: url, top: 6 });
