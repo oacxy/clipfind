@@ -85,6 +85,7 @@ class Clip:
     lines: List[Line]
     score: float
     hook: str
+    reasoning: str = ""  # populated by the LLM scorer; empty for the heuristic path
 
 
 def parse_timestamp(ts: str) -> float:

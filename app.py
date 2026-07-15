@@ -32,6 +32,8 @@ from flask_login import (
     current_user,
 )
 
+from llm_scorer import score_with_llm
+
 from clipfind import (
     fetch_youtube_transcript,
     load_transcript,
@@ -110,6 +112,7 @@ def clips_to_json(clips):
                 "hook": c.hook,
                 "caption": c.hook.strip().rstrip("."),
                 "preview": preview,
+                "reasoning": c.reasoning,
             }
         )
     return out
@@ -393,12 +396,24 @@ def analyze():
     if not lines:
         return jsonify({"error": "Got an empty transcript for that video."}), 502
 
-    lines = score_transcript(lines)
-    clips = build_clips(lines, top_n=top)
+    scoring_method = "heuristic"
+    try:
+        clips = score_with_llm(lines, top_n=top)
+        scoring_method = "llm"
+    except Exception as e:
+        # No API key set, Claude API error, bad JSON back, rate limited, etc.
+        # Never let an LLM hiccup take down the whole feature — fall back
+        # to the free heuristic scorer so /api/analyze still returns
+        # something useful.
+        app.logger.warning(f"LLM scoring failed, falling back to heuristic: {e}")
+        scored_lines = score_transcript(lines)
+        clips = build_clips(scored_lines, top_n=top)
+
     current_user.record_usage()
     return jsonify(
         {
             "clips": clips_to_json(clips),
+            "scoring_method": scoring_method,
             "source": "youtube",
             "remaining_today": current_user.remaining_today(),
         }
@@ -504,6 +519,7 @@ INDEX_HTML = """
   .clip .meta{display:flex;justify-content:space-between;color:var(--text-dim);font-size:0.8rem;margin-bottom:8px;}
   .clip .score{color:var(--green);font-weight:700;}
   .clip .hook{font-weight:600;margin-bottom:6px;}
+  .clip .reasoning{color:var(--accent);font-size:0.85rem;margin-bottom:8px;font-style:italic;}
   .clip .preview{color:var(--text-dim);font-size:0.85rem;}
   .clip .actions{margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
   .clip .actions button{padding:8px 14px;font-size:0.82rem;}
@@ -712,6 +728,7 @@ function renderClips(clips, isYoutube) {
     div.innerHTML = `
       <div class="meta"><span>${c.start} – ${c.end}</span><span class="score">score ${c.score}</span></div>
       <div class="hook">"${c.hook}"</div>
+      ${c.reasoning ? `<div class="reasoning">🧠 ${c.reasoning}</div>` : ''}
       <div class="preview">${c.preview}</div>
       <div class="actions"></div>
       <div class="cut-status"></div>
@@ -766,7 +783,8 @@ async function run(endpoint, body) {
     }
     const isYoutube = data.source === 'youtube';
     lastYoutubeUrl = isYoutube ? (body && body.youtube_url) : null;
-    statusEl.textContent = `${data.clips.length} clips found${data.source === 'demo' ? ' (demo transcript)' : ''}`;
+    const methodNote = data.scoring_method === 'llm' ? ' — AI-analyzed' : (data.scoring_method === 'heuristic' && data.source === 'youtube' ? ' — basic scoring (AI analysis unavailable right now)' : '');
+    statusEl.textContent = `${data.clips.length} clips found${data.source === 'demo' ? ' (demo transcript)' : ''}${methodNote}`;
     renderClips(data.clips, isYoutube);
     if (typeof data.remaining_today !== 'undefined') {
       session.remaining_today = data.remaining_today;
