@@ -201,18 +201,51 @@ def merge_fragments(entries: list, max_words: int = 20, max_gap: float = 2.0) ->
     return lines
 
 
+def _build_transcript_api():
+    """Build a YouTubeTranscriptApi instance, routed through a Webshare
+    residential proxy if credentials are set in the environment.
+
+    YouTube blocks most cloud-provider IPs (Render, AWS, GCP, Azure, etc.)
+    outright with RequestBlocked/IpBlocked errors — this isn't a bug in
+    this code, it's YouTube's own anti-bot policy. The documented fix
+    (see youtube-transcript-api's README, "Working around IP bans") is to
+    route requests through a rotating residential proxy. Set
+    WEBSHARE_PROXY_USERNAME / WEBSHARE_PROXY_PASSWORD as environment
+    variables (e.g. in Render's Environment tab) once you have a Webshare
+    "Residential" proxy package, and this will pick them up automatically.
+    Without them set, this falls back to a direct (likely to be blocked
+    on cloud hosts) connection — fine for local testing.
+    """
+    import os
+    from youtube_transcript_api import YouTubeTranscriptApi
+
+    username = os.environ.get("WEBSHARE_PROXY_USERNAME")
+    password = os.environ.get("WEBSHARE_PROXY_PASSWORD")
+
+    if username and password:
+        from youtube_transcript_api.proxies import WebshareProxyConfig
+
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=username,
+                proxy_password=password,
+            )
+        )
+
+    return YouTubeTranscriptApi()
+
+
 def fetch_youtube_transcript(url_or_id: str, languages=("en",)) -> List[Line]:
     """Fetch a YouTube video's transcript and return it as merged Lines,
     ready to pass straight into score_transcript()."""
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
+        api = _build_transcript_api()
     except ImportError:
         raise RuntimeError(
             "youtube-transcript-api isn't installed. Run: pip install youtube-transcript-api"
         )
 
     video_id = extract_video_id(url_or_id)
-    api = YouTubeTranscriptApi()
     raw = api.fetch(video_id, languages=list(languages))
     return merge_fragments(raw)
 
