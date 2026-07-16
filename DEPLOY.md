@@ -193,6 +193,56 @@ quota. Note this also runs the same clip scorer as `/api/analyze` on the
 top candidates each refresh — factor a handful of extra LLM calls per
 refresh into the Anthropic cost math from earlier.
 
+## Setting up the email digest
+
+Same Discover feed, delivered straight to people's inboxes instead of
+requiring them to remember to check the app — the goal from the original
+"make them as lazy as possible" idea. Everyone's opted in by default;
+each email has an unsubscribe link that flips them out of it.
+
+### 1. A Resend account (sends the emails)
+
+1. Sign up at [resend.com](https://resend.com) — free tier is 3,000
+   emails/month, 100/day, which is plenty at this stage.
+2. Get your **API key** from the dashboard (Settings → API Keys).
+3. In Render → `clipfind-v2` → Environment, add `RESEND_API_KEY` set to
+   that key.
+
+**Important limitation until clipfind.com is bought and verified**:
+without a verified sending domain, Resend only lets you deliver to the
+email address you signed up with — so digest emails will only actually
+reach you, not other users, until you (1) buy the domain, (2) add and
+verify it in Resend's dashboard (a DNS record or two), and (3) update the
+`DIGEST_FROM_EMAIL` env var to something like
+`ClipFind <digest@clipfind.com>`. Fine to leave as-is for now while
+you're the only tester.
+
+### 2. The cron secret (so only your scheduler can trigger sends)
+
+`/api/cron/send-digest` sends real email to every opted-in user when
+hit — it's protected by a shared secret so a stranger can't spam your
+whole user base by finding the URL. Generate one the same way as before:
+`python3 -c "import secrets; print(secrets.token_hex(24))"`, then add it
+to Render as `CRON_SECRET`.
+
+### 3. An external scheduler to actually trigger it
+
+Render's free/starter web service doesn't include a built-in cron —
+Render does offer a separate "Cron Job" resource type, but that's another
+paid line item. Simpler zero-cost path: a free external pinger.
+
+1. Sign up at [cron-job.org](https://cron-job.org) (free).
+2. Create a new cron job with the URL:
+   `https://clipfind-v2.onrender.com/api/cron/send-digest?secret=YOUR_CRON_SECRET`
+   (your actual live URL + that query string).
+3. Set the schedule — e.g. once a day, morning in your users' timezone.
+4. Save. Test it once manually via cron-job.org's "Run now" button and
+   check your own inbox (see the domain-verification limitation above —
+   for now it'll only land in the email you signed up to Resend with).
+
+The response is JSON (`{"sent": N, "failed": N}`) so cron-job.org's
+execution history doubles as a lightweight send log.
+
 ## Cost and scope to know about before charging anyone
 
 - **Bandwidth**: cutting actual video uses far more Webshare proxy

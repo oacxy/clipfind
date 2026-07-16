@@ -40,6 +40,11 @@ class User(UserMixin, db.Model):
     stripe_subscription_id = db.Column(db.String(255), nullable=True)
     is_paid = db.Column(db.Boolean, default=False, nullable=False)
 
+    # Everyone gets the discover digest by default (lazier for the user =
+    # more reasons to come back) — this just tracks who's clicked
+    # unsubscribe, rather than requiring an explicit opt-in step.
+    email_opt_in = db.Column(db.Boolean, default=True, nullable=False)
+
     def set_password(self, raw_password: str) -> None:
         self.password_hash = generate_password_hash(raw_password)
 

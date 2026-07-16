@@ -36,6 +36,7 @@ from flask_login import (
 
 from llm_scorer import score_with_llm
 from discover import build_discover_feed
+from digest import send_digest_emails, generate_unsubscribe_token, verify_unsubscribe_token
 
 from clipfind import (
     fetch_youtube_transcript,
@@ -65,8 +66,29 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-insecure-key-set-SECRET_KEY-in-prod")
 db.init_app(app)
 
+def _ensure_email_opt_in_column():
+    """db.create_all() only creates missing tables — it never alters an
+    existing one. The production `users` table already has real rows, so
+    adding the new email_opt_in field to the model needs an actual ALTER
+    TABLE the first time this new code runs. Safe to call on every
+    startup: it checks whether the column's already there first, so
+    it's a no-op after the first successful run."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(db.engine)
+    existing_cols = {c["name"] for c in inspector.get_columns("users")}
+    if "email_opt_in" not in existing_cols:
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN email_opt_in BOOLEAN NOT NULL DEFAULT TRUE")
+            )
+            conn.commit()
+        print("[MIGRATION] added users.email_opt_in", flush=True)
+
+
 with app.app_context():
     db.create_all()
+    _ensure_email_opt_in_column()
 
 # --- Auth ---------------------------------------------------------------
 login_manager = LoginManager()
@@ -96,6 +118,18 @@ def json_login_required(view):
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+
+# --- Email digest -----------------------------------------------------------
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+# Until a real domain is verified with Resend, this has to stay
+# onboarding@resend.dev — Resend only lets unverified senders deliver to
+# the account owner's own inbox, which is fine for testing but won't
+# reach real users. Update this (and verify the domain) once clipfind.com
+# is set up with Resend.
+DIGEST_FROM_EMAIL = os.environ.get("DIGEST_FROM_EMAIL", "ClipFind <onboarding@resend.dev>")
+# Shared secret the external cron pinger has to send so randoms on the
+# internet can't trigger mass emails by hitting the endpoint themselves.
+CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
 
 def clips_to_json(clips):
@@ -501,6 +535,34 @@ def demo():
 DISCOVER_MAX_AGE = datetime.timedelta(hours=3)
 
 
+def _get_or_refresh_feed(force: bool = False):
+    """Shared by /api/discover and the digest cron job — both need the
+    same cached-with-refresh-on-stale feed, so this is the one place
+    that logic lives. Returns (feed_list, row_or_None). Raises only if
+    a refresh was needed and failed AND there's no prior cache to fall
+    back to."""
+    row = DiscoverFeed.query.order_by(DiscoverFeed.computed_at.desc()).first()
+    is_stale = row is None or (datetime.datetime.utcnow() - row.computed_at) > DISCOVER_MAX_AGE
+
+    if is_stale or force:
+        try:
+            feed = build_discover_feed()
+        except Exception as e:
+            print(f"[DISCOVER_REFRESH_FAILED] {type(e).__name__}: {e}", flush=True)
+            if row is None:
+                raise
+            # Fall back to serving the last good cached feed rather than erroring.
+            feed = json.loads(row.feed_json)
+        else:
+            row = DiscoverFeed(feed_json=json.dumps(feed))
+            db.session.add(row)
+            db.session.commit()
+    else:
+        feed = json.loads(row.feed_json)
+
+    return feed, row
+
+
 @app.route("/api/discover", methods=["GET"])
 @json_login_required
 def discover():
@@ -515,26 +577,67 @@ def discover():
     gets the cached result instantly. Fine at this scale — worth moving
     to a proper background job later if traffic grows."""
     force = request.args.get("refresh") == "1"
-    row = DiscoverFeed.query.order_by(DiscoverFeed.computed_at.desc()).first()
-    is_stale = row is None or (datetime.datetime.utcnow() - row.computed_at) > DISCOVER_MAX_AGE
-
-    if is_stale or force:
-        try:
-            feed = build_discover_feed()
-        except Exception as e:
-            print(f"[DISCOVER_REFRESH_FAILED] {type(e).__name__}: {e}", flush=True)
-            if row is None:
-                return jsonify({"error": f"Couldn't build the discover feed yet ({e})."}), 502
-            # Fall back to serving the last good cached feed rather than erroring.
-            feed = json.loads(row.feed_json)
-        else:
-            row = DiscoverFeed(feed_json=json.dumps(feed))
-            db.session.add(row)
-            db.session.commit()
-    else:
-        feed = json.loads(row.feed_json)
+    try:
+        feed, row = _get_or_refresh_feed(force=force)
+    except Exception as e:
+        return jsonify({"error": f"Couldn't build the discover feed yet ({e})."}), 502
 
     return jsonify({"feed": feed, "computed_at": row.computed_at.isoformat() if row else None})
+
+
+@app.route("/api/cron/send-digest", methods=["GET", "POST"])
+def cron_send_digest():
+    """Triggered by an external scheduler (cron-job.org or similar) —
+    Render's free/starter web service has no built-in cron, and this is
+    the zero-added-cost way to get a scheduled trigger without standing
+    up a separate service. Protected by a shared secret rather than
+    login, since the caller here is a script, not a signed-in user."""
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET is not configured on this server."}), 500
+    if request.args.get("secret") != CRON_SECRET:
+        return jsonify({"error": "Forbidden."}), 403
+    if not RESEND_API_KEY:
+        return jsonify({"error": "RESEND_API_KEY is not configured on this server."}), 500
+
+    try:
+        feed, _ = _get_or_refresh_feed(force=False)
+    except Exception as e:
+        return jsonify({"error": f"Couldn't get a discover feed to send ({e})."}), 502
+
+    users = User.query.filter_by(email_opt_in=True).all()
+    base_url = request.host_url.rstrip("/")
+    result = send_digest_emails(
+        feed=feed,
+        users=users,
+        app_url=base_url,
+        secret_key=app.secret_key,
+        api_key=RESEND_API_KEY,
+        from_email=DIGEST_FROM_EMAIL,
+    )
+    return jsonify(result)
+
+
+@app.route("/unsubscribe", methods=["GET"])
+def unsubscribe():
+    token = request.args.get("token", "")
+    user_id = verify_unsubscribe_token(token, app.secret_key)
+    if user_id is None:
+        message = "That unsubscribe link is invalid or expired."
+    else:
+        user = User.query.get(user_id)
+        if user is not None:
+            user.email_opt_in = False
+            db.session.commit()
+        message = "You're unsubscribed from the ClipFind digest. You can still use the app any time."
+
+    return f"""
+    <html><body style="background:#0a0a0f;color:#f2f2f5;font-family:-apple-system,sans-serif;
+      display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+      <div style="text-align:center;max-width:420px;padding:24px;">
+        <p style="font-size:16px;line-height:1.5;">{message}</p>
+      </div>
+    </body></html>
+    """
 
 
 INDEX_HTML = """
@@ -851,6 +954,12 @@ async function loadDiscover(forceRefresh) {
 tabAnalyzeBtn.addEventListener('click', () => switchTab('analyze'));
 tabDiscoverBtn.addEventListener('click', () => switchTab('discover'));
 refreshDiscoverBtn.addEventListener('click', () => loadDiscover(true));
+
+// Digest emails link here with ?tab=discover so clicking "Open ClipFind"
+// lands people straight on the feed instead of the paste-a-link screen.
+if (new URLSearchParams(window.location.search).get('tab') === 'discover') {
+  switchTab('discover');
+}
 
 async function cutClip(youtubeUrl, start, end, statusNode, videoWrap) {
   statusNode.className = 'cut-status';
