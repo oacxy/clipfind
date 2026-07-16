@@ -20,6 +20,7 @@ on a user-submitted link — no separate/duplicate judgment logic.
 
 import os
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional
 
 import requests
@@ -42,6 +43,15 @@ NICHES = [
 LOOKBACK_HOURS = 48  # only consider videos published in this window
 CANDIDATES_PER_NICHE = 6
 FEED_SIZE = 8  # how many final picks to show/store
+
+# Scoring each candidate (transcript fetch + LLM call) is the slow part —
+# doing it one at a time for up to ~24 candidates can take minutes and blow
+# past the server's request timeout. Two guardrails: only ever attempt a
+# bounded number of candidates regardless of how many fail, and run the
+# attempts concurrently (they're I/O-bound network calls, so threads are
+# enough — no need for real parallelism).
+MAX_CANDIDATES_TO_ATTEMPT = 14
+SCORING_CONCURRENCY = 6
 
 
 def _api_key() -> str:
@@ -180,9 +190,11 @@ def build_discover_feed(feed_size: int = FEED_SIZE) -> List[dict]:
     for niche in NICHES:
         try:
             video_ids = _search_recent_videos(niche, api_key, max_results=CANDIDATES_PER_NICHE)
-        except requests.HTTPError as e:
-            # One bad niche query shouldn't kill the whole refresh —
-            # log and move on to the next niche.
+        except requests.RequestException as e:
+            # One bad niche query shouldn't kill the whole refresh — log
+            # and move on to the next niche. Catches HTTP errors (bad
+            # key, quota) as well as timeouts/connection errors, not
+            # just HTTPError.
             print(f"[DISCOVER] search failed for {niche!r}: {e}", flush=True)
             continue
         stats = _get_video_stats(video_ids, api_key)
@@ -208,13 +220,34 @@ def build_discover_feed(feed_size: int = FEED_SIZE) -> List[dict]:
 
     ranked.sort(key=lambda x: x["velocity_score"], reverse=True)
 
+    # Only attempt scoring on a bounded slice of the ranked list — trying
+    # every single candidate (transcript fetch + LLM call each) is what
+    # was pushing this past the request timeout. Attempting them
+    # concurrently instead of one-by-one is what actually keeps wall time
+    # down; the cap is just a backstop for a genuinely bad batch.
+    to_attempt = ranked[:MAX_CANDIDATES_TO_ATTEMPT]
+
+    results: Dict[str, Optional[dict]] = {}
+    with ThreadPoolExecutor(max_workers=SCORING_CONCURRENCY) as pool:
+        futures = {
+            pool.submit(_best_clip_for_video, info["video_id"]): info["video_id"]
+            for info in to_attempt
+        }
+        for future in as_completed(futures):
+            video_id = futures[future]
+            try:
+                results[video_id] = future.result()
+            except Exception as e:
+                print(f"[DISCOVER] scoring crashed for {video_id}: {e}", flush=True)
+                results[video_id] = None
+
     feed = []
-    for info in ranked:
+    for info in to_attempt:
         if len(feed) >= feed_size:
             break
-        clip = _best_clip_for_video(info["video_id"])
+        clip = results.get(info["video_id"])
         if clip is None:
-            continue  # e.g. captions disabled — skip, try the next candidate
+            continue  # e.g. captions disabled — skip, next candidate
         feed.append({**info, "clip": clip})
 
     return feed

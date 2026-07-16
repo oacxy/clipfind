@@ -21,4 +21,4 @@ RUN mkdir -p /app/clips_output
 
 EXPOSE 10000
 
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000", "--timeout", "180"]
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000", "--timeout", "300"]
