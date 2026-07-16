@@ -397,6 +397,7 @@ def analyze():
         return jsonify({"error": "Got an empty transcript for that video."}), 502
 
     scoring_method = "heuristic"
+    llm_error = None
     try:
         clips = score_with_llm(lines, top_n=top)
         scoring_method = "llm"
@@ -405,19 +406,33 @@ def analyze():
         # Never let an LLM hiccup take down the whole feature — fall back
         # to the free heuristic scorer so /api/analyze still returns
         # something useful.
-        app.logger.warning(f"LLM scoring failed, falling back to heuristic: {e}")
+        #
+        # Using print() (not app.logger) here on purpose — Flask's logger
+        # doesn't reliably surface through gunicorn's output stream without
+        # extra config, but stdout always does. traceback included so the
+        # real cause (bad key, rate limit, JSON parse failure, etc.) shows
+        # up in Render's logs instead of a bare exception message.
+        import traceback
+        llm_error = f"{type(e).__name__}: {e}"
+        print(f"[LLM_SCORING_FAILED] {llm_error}", flush=True)
+        traceback.print_exc()
         scored_lines = score_transcript(lines)
         clips = build_clips(scored_lines, top_n=top)
 
     current_user.record_usage()
-    return jsonify(
-        {
-            "clips": clips_to_json(clips),
-            "scoring_method": scoring_method,
-            "source": "youtube",
-            "remaining_today": current_user.remaining_today(),
-        }
-    )
+    response = {
+        "clips": clips_to_json(clips),
+        "scoring_method": scoring_method,
+        "source": "youtube",
+        "remaining_today": current_user.remaining_today(),
+    }
+    # TEMPORARY debug aid: surfaces the real LLM failure reason directly in
+    # the response so it's visible without digging through Render logs.
+    # Remove this before real users are hitting the app — you don't want
+    # to expose internal error details/tracebacks to end users long-term.
+    if llm_error:
+        response["llm_debug"] = llm_error
+    return jsonify(response)
 
 
 @app.route("/api/cut", methods=["POST"])
@@ -783,7 +798,8 @@ async function run(endpoint, body) {
     }
     const isYoutube = data.source === 'youtube';
     lastYoutubeUrl = isYoutube ? (body && body.youtube_url) : null;
-    const methodNote = data.scoring_method === 'llm' ? ' — AI-analyzed' : (data.scoring_method === 'heuristic' && data.source === 'youtube' ? ' — basic scoring (AI analysis unavailable right now)' : '');
+    let methodNote = data.scoring_method === 'llm' ? ' — AI-analyzed' : (data.scoring_method === 'heuristic' && data.source === 'youtube' ? ' — basic scoring (AI analysis unavailable right now)' : '');
+    if (data.llm_debug) { methodNote += ` [debug: ${data.llm_debug}]`; }
     statusEl.textContent = `${data.clips.length} clips found${data.source === 'demo' ? ' (demo transcript)' : ''}${methodNote}`;
     renderClips(data.clips, isYoutube);
     if (typeof data.remaining_today !== 'undefined') {
