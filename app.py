@@ -16,8 +16,10 @@ note in DEPLOY.md about sandboxed environments that block that).
 """
 
 import os
+import json
 import uuid
 import shutil
+import datetime
 import functools
 import subprocess
 import tempfile
@@ -33,6 +35,7 @@ from flask_login import (
 )
 
 from llm_scorer import score_with_llm
+from discover import build_discover_feed
 
 from clipfind import (
     fetch_youtube_transcript,
@@ -42,7 +45,7 @@ from clipfind import (
     fmt_timestamp,
     parse_timestamp,
 )
-from models import db, User, FREE_DAILY_LIMIT, PAID_MAX_CLIP_SECONDS
+from models import db, User, DiscoverFeed, FREE_DAILY_LIMIT, PAID_MAX_CLIP_SECONDS
 
 app = Flask(__name__)
 
@@ -495,6 +498,45 @@ def demo():
     return jsonify({"clips": clips_to_json(clips), "source": "demo"})
 
 
+DISCOVER_MAX_AGE = datetime.timedelta(hours=3)
+
+
+@app.route("/api/discover", methods=["GET"])
+@json_login_required
+def discover():
+    """Serves the cached Discover feed, refreshing it in-process if it's
+    missing or stale. Deliberately NOT behind the daily analyze/cut
+    limits — browsing the feed costs nothing extra per visitor since the
+    expensive work (YouTube API calls + clip scoring) already happened
+    once at refresh time, not per request.
+
+    First visitor after the cache goes stale pays a slower request (the
+    refresh runs synchronously, can take 15-30s); everyone after that
+    gets the cached result instantly. Fine at this scale — worth moving
+    to a proper background job later if traffic grows."""
+    force = request.args.get("refresh") == "1"
+    row = DiscoverFeed.query.order_by(DiscoverFeed.computed_at.desc()).first()
+    is_stale = row is None or (datetime.datetime.utcnow() - row.computed_at) > DISCOVER_MAX_AGE
+
+    if is_stale or force:
+        try:
+            feed = build_discover_feed()
+        except Exception as e:
+            print(f"[DISCOVER_REFRESH_FAILED] {type(e).__name__}: {e}", flush=True)
+            if row is None:
+                return jsonify({"error": f"Couldn't build the discover feed yet ({e})."}), 502
+            # Fall back to serving the last good cached feed rather than erroring.
+            feed = json.loads(row.feed_json)
+        else:
+            row = DiscoverFeed(feed_json=json.dumps(feed))
+            db.session.add(row)
+            db.session.commit()
+    else:
+        feed = json.loads(row.feed_json)
+
+    return jsonify({"feed": feed, "computed_at": row.computed_at.isoformat() if row else None})
+
+
 INDEX_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -558,6 +600,18 @@ INDEX_HTML = """
   }
   input[type=email]:focus, input[type=password]:focus{outline:none;border-color:var(--accent);}
   .auth-note{margin-top:10px;font-size:0.8rem;color:var(--text-dim);}
+  .tabs{display:flex;gap:8px;margin-bottom:12px;}
+  .tab-btn{background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:10px 18px;font-size:0.9rem;}
+  .tab-btn.active{background:var(--card);color:var(--text);border-color:var(--accent);}
+  .discover-card{background:#0d0d13;border:1px solid var(--border);border-radius:12px;padding:18px;display:flex;gap:14px;}
+  .discover-card img{width:120px;height:68px;object-fit:cover;border-radius:6px;flex-shrink:0;}
+  .discover-card .dinfo{flex:1;min-width:0;}
+  .discover-card .dmeta{font-size:0.75rem;color:var(--text-dim);margin-bottom:4px;}
+  .discover-card .dtitle{font-weight:600;margin-bottom:6px;}
+  .discover-card .velocity{color:var(--green);font-weight:700;}
+  .discover-card .dclip{font-size:0.85rem;color:var(--text-dim);margin-top:6px;}
+  .discover-card .dclip b{color:var(--text);}
+  .discover-card button{margin-top:10px;padding:8px 14px;font-size:0.82rem;}
 </style>
 </head>
 <body>
@@ -583,7 +637,12 @@ INDEX_HTML = """
     </div>
   </div>
 
-  <div class="panel">
+  <div class="tabs">
+    <button class="tab-btn active" id="tabAnalyzeBtn">Paste a link</button>
+    <button class="tab-btn" id="tabDiscoverBtn">Discover</button>
+  </div>
+
+  <div class="panel" id="analyzeTab">
     <div class="row">
       <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
       <button id="analyzeBtn">Find clips</button>
@@ -592,7 +651,17 @@ INDEX_HTML = """
     <div class="status" id="status"></div>
     <div class="results" id="results"></div>
   </div>
-  <div class="footer-note">Prototype — scoring is heuristic-based, not yet LLM-powered.</div>
+
+  <div class="panel" id="discoverTab" style="display:none;">
+    <div class="row" style="justify-content:space-between;">
+      <div class="tag" style="margin:0;text-align:left;">Videos outperforming right now — worth clipping today.</div>
+      <button class="secondary" id="refreshDiscoverBtn">Refresh</button>
+    </div>
+    <div class="status" id="discoverStatus"></div>
+    <div class="results" id="discoverResults"></div>
+  </div>
+
+  <div class="footer-note">ClipFind — AI-analyzed clips, found for you or discovered automatically.</div>
 </div>
 
 <script>
@@ -697,6 +766,91 @@ if (new URLSearchParams(window.location.search).get('checkout') === 'success') {
 }
 
 refreshSession();
+
+// --- Discover tab ---------------------------------------------------
+const tabAnalyzeBtn = document.getElementById('tabAnalyzeBtn');
+const tabDiscoverBtn = document.getElementById('tabDiscoverBtn');
+const analyzeTab = document.getElementById('analyzeTab');
+const discoverTab = document.getElementById('discoverTab');
+const discoverStatus = document.getElementById('discoverStatus');
+const discoverResults = document.getElementById('discoverResults');
+const refreshDiscoverBtn = document.getElementById('refreshDiscoverBtn');
+
+let discoverLoaded = false;
+
+function switchTab(tab) {
+  const showDiscover = tab === 'discover';
+  tabAnalyzeBtn.classList.toggle('active', !showDiscover);
+  tabDiscoverBtn.classList.toggle('active', showDiscover);
+  analyzeTab.style.display = showDiscover ? 'none' : 'block';
+  discoverTab.style.display = showDiscover ? 'block' : 'none';
+  if (showDiscover && !discoverLoaded) {
+    loadDiscover(false);
+  }
+}
+
+function fmtTime(s) {
+  s = Math.round(s);
+  const m = Math.floor(s / 60), sec = s % 60;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function renderDiscover(feed) {
+  discoverResults.innerHTML = '';
+  if (!feed.length) {
+    discoverStatus.textContent = 'No picks available right now — try refreshing in a bit.';
+    return;
+  }
+  feed.forEach((pick) => {
+    const div = document.createElement('div');
+    div.className = 'discover-card';
+    const clip = pick.clip || {};
+    div.innerHTML = `
+      ${pick.thumbnail ? `<img src="${pick.thumbnail}" alt="">` : ''}
+      <div class="dinfo">
+        <div class="dmeta">${pick.channel_title} · <span class="velocity">${pick.velocity_score}x</span> normal velocity</div>
+        <div class="dtitle">${pick.title}</div>
+        <div class="dclip">🧠 <b>${clip.hook || 'Clip found'}</b> — ${clip.reasoning || ''}</div>
+        <button class="secondary open-btn">Analyze this video</button>
+      </div>
+    `;
+    discoverResults.appendChild(div);
+    div.querySelector('.open-btn').addEventListener('click', () => {
+      urlInput.value = `https://www.youtube.com/watch?v=${pick.video_id}`;
+      switchTab('analyze');
+      run('/api/analyze', { youtube_url: urlInput.value, top: 6 });
+    });
+  });
+}
+
+async function loadDiscover(forceRefresh) {
+  discoverStatus.className = 'status';
+  discoverStatus.textContent = 'Loading discover feed...';
+  discoverResults.innerHTML = '';
+  try {
+    const res = await fetch(`/api/discover${forceRefresh ? '?refresh=1' : ''}`);
+    const data = await res.json();
+    if (!res.ok) {
+      discoverStatus.className = 'status error';
+      if (data.auth_required) {
+        discoverStatus.textContent = 'Sign in above first.';
+      } else {
+        discoverStatus.textContent = data.error || 'Could not load the discover feed.';
+      }
+      return;
+    }
+    discoverLoaded = true;
+    discoverStatus.textContent = `${data.feed.length} picks · updated ${data.computed_at ? new Date(data.computed_at).toLocaleString() : 'just now'}`;
+    renderDiscover(data.feed);
+  } catch (e) {
+    discoverStatus.className = 'status error';
+    discoverStatus.textContent = 'Network error loading discover feed.';
+  }
+}
+
+tabAnalyzeBtn.addEventListener('click', () => switchTab('analyze'));
+tabDiscoverBtn.addEventListener('click', () => switchTab('discover'));
+refreshDiscoverBtn.addEventListener('click', () => loadDiscover(true));
 
 async function cutClip(youtubeUrl, start, end, statusNode, videoWrap) {
   statusNode.className = 'cut-status';

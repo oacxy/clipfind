@@ -90,3 +90,17 @@ class DailyUsage(db.Model):
     date = db.Column(db.Date, nullable=False, default=datetime.date.today)
     kind = db.Column(db.String(20), nullable=False, default="analyze")
     count = db.Column(db.Integer, default=0, nullable=False)
+
+
+class DiscoverFeed(db.Model):
+    """Caches the Discover tab's results so we hit the YouTube Data API
+    and the clip scorer (LLM cost!) once per refresh, not once per
+    visitor. A single row holds the whole feed as JSON, replaced wholesale
+    on each refresh rather than diffed row-by-row — simplest thing that
+    works at this scale."""
+
+    __tablename__ = "discover_feed"
+
+    id = db.Column(db.Integer, primary_key=True)
+    computed_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
+    feed_json = db.Column(db.Text, nullable=False)  # JSON-encoded list of picks
