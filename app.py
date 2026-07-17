@@ -250,7 +250,21 @@ def cut_youtube_clip(
     section_end = end_seconds + pad
 
     ydl_opts = {
-        "format": f"mp4[height<={max_height}]/mp4/best",
+        # YouTube only offers pre-merged progressive mp4 up to ~720p —
+        # anything higher (the whole point of raising max_height past
+        # 720) only exists as separate video-only + audio-only streams
+        # that need merging. The old selector (`mp4[height<=X]/mp4/best`)
+        # matched progressive mp4 first, which silently capped real
+        # quality around 720p no matter what max_height said. This tries
+        # a native mp4+m4a merge first (compatible container, cheap),
+        # then falls back to merging whatever the best available streams
+        # are regardless of container — yt-dlp/ffmpeg remux it either way.
+        "format": (
+            f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]"
+            f"/bestvideo[height<={max_height}]+bestaudio"
+            f"/best[height<={max_height}]/best"
+        ),
+        "merge_output_format": "mp4",
         "outtmpl": raw_template,
         "download_ranges": yt_dlp.utils.download_range_func(None, [(section_start, section_end)]),
         "force_keyframes_at_cuts": True,
@@ -313,7 +327,7 @@ def cut_youtube_clip(
         def run_ffmpeg(extra_args):
             cmd = ["ffmpeg", "-y", "-ss", str(relative_start), "-i", raw_path, "-t", str(duration)]
             cmd += extra_args + [out_path]
-            subprocess.run(cmd, check=True, capture_output=True, timeout=90)
+            subprocess.run(cmd, check=True, capture_output=True, timeout=120)
 
         try:
             # Fast path: stream copy (no re-encode, no quality loss at
@@ -322,8 +336,12 @@ def cut_youtube_clip(
             run_ffmpeg(["-c", "copy"])
         except subprocess.CalledProcessError:
             try:
+                # CRF 18 ("visually lossless" territory) + preset medium
+                # (better compression efficiency than fast, at the cost of
+                # some encode time — worth it since clips are short, up to
+                # 180s on the paid tier).
                 run_ffmpeg(
-                    ["-c:v", "libx264", "-crf", "20", "-preset", "fast", "-c:a", "aac"]
+                    ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-c:a", "aac"]
                 )
             except subprocess.CalledProcessError:
                 shutil.rmtree(workdir, ignore_errors=True)
@@ -379,8 +397,11 @@ def _cut_with_captions_and_crop(
     cmd = ["ffmpeg", "-y", "-ss", str(relative_start), "-i", raw_path, "-t", str(duration)]
     if vf_parts:
         cmd += ["-vf", ",".join(vf_parts)]
-    cmd += ["-c:v", "libx264", "-crf", "20", "-preset", "fast", "-c:a", "aac", out_path]
-    subprocess.run(cmd, check=True, capture_output=True, timeout=150)
+    # Same CRF 18 / preset medium bump as the plain trim path — a bit
+    # more encode time in exchange for noticeably less compression
+    # softness, worthwhile given clips are short.
+    cmd += ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-c:a", "aac", out_path]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=240)
 
 
 @app.route("/api/auth", methods=["POST"])
