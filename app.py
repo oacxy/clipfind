@@ -284,27 +284,21 @@ def cut_youtube_clip(
     relative_start = max(0.0, start_seconds - section_start)
     duration = end_seconds - start_seconds
 
-    def run_ffmpeg(extra_args):
-        cmd = ["ffmpeg", "-y", "-ss", str(relative_start), "-i", raw_path, "-t", str(duration)]
-        cmd += extra_args + [out_path]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=90)
-
-    try:
-        # Fast path: stream copy (no re-encode). Fails if the cut point
-        # doesn't land near a keyframe, in which case we fall back below.
-        run_ffmpeg(["-c", "copy"])
-    except subprocess.CalledProcessError:
-        try:
-            run_ffmpeg(["-c:v", "libx264", "-c:a", "aac", "-preset", "veryfast"])
-        except subprocess.CalledProcessError as e:
-            shutil.rmtree(workdir, ignore_errors=True)
-            raise RuntimeError("Couldn't trim the video to that time range.")
-
     if captions or vertical:
+        # Captions/crop need a video filter, which means a re-encode no
+        # matter what — so trim, crop, and caption burn-in all happen in
+        # ONE ffmpeg pass here, straight from the raw download. Doing the
+        # trim separately first and then a second re-encode pass for
+        # crop/captions (the original approach) meant re-encoding an
+        # already-encoded file — real, visible quality loss on top of an
+        # already-lossy step, for no benefit.
         try:
-            _apply_captions_and_crop(
-                trimmed_path=out_path,
+            _cut_with_captions_and_crop(
+                raw_path=raw_path,
+                out_path=out_path,
                 workdir=workdir,
+                relative_start=relative_start,
+                duration=duration,
                 clip_start=start_seconds,
                 clip_end=end_seconds,
                 lines=lines or [],
@@ -314,15 +308,37 @@ def cut_youtube_clip(
             )
         except Exception as e:
             shutil.rmtree(workdir, ignore_errors=True)
-            raise RuntimeError(f"Cut the clip, but couldn't apply captions/crop ({e}).")
+            raise RuntimeError(f"Couldn't cut/style that clip ({e}).")
+    else:
+        def run_ffmpeg(extra_args):
+            cmd = ["ffmpeg", "-y", "-ss", str(relative_start), "-i", raw_path, "-t", str(duration)]
+            cmd += extra_args + [out_path]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=90)
+
+        try:
+            # Fast path: stream copy (no re-encode, no quality loss at
+            # all). Fails if the cut point doesn't land near a keyframe,
+            # in which case we fall back to a re-encode below.
+            run_ffmpeg(["-c", "copy"])
+        except subprocess.CalledProcessError:
+            try:
+                run_ffmpeg(
+                    ["-c:v", "libx264", "-crf", "20", "-preset", "fast", "-c:a", "aac"]
+                )
+            except subprocess.CalledProcessError:
+                shutil.rmtree(workdir, ignore_errors=True)
+                raise RuntimeError("Couldn't trim the video to that time range.")
 
     shutil.rmtree(workdir, ignore_errors=True)
     return f"{clip_id}.mp4"
 
 
-def _apply_captions_and_crop(
-    trimmed_path: str,
+def _cut_with_captions_and_crop(
+    raw_path: str,
+    out_path: str,
     workdir: str,
+    relative_start: float,
+    duration: float,
     clip_start: float,
     clip_end: float,
     lines: list,
@@ -330,12 +346,11 @@ def _apply_captions_and_crop(
     caption_style: str,
     vertical: bool,
 ) -> None:
-    """Second re-encode pass over the already-trimmed clip: crops to 9:16
-    (if requested) and/or burns in styled captions (if requested), writing
-    the result back over `trimmed_path`. Runs after the main trim rather
-    than combined into one pass so the (more reliable) stream-copy fast
-    path above is unaffected when neither extra is requested."""
-    width, height = _probe_dimensions(trimmed_path)
+    """Trims, crops to 9:16 (if requested), and burns in styled captions
+    (if requested) in a single ffmpeg pass straight from the raw
+    download — one re-encode total, not a trim pass followed by a second
+    re-encode pass for the extras."""
+    width, height = _probe_dimensions(raw_path)
 
     vf_parts = []
     out_width, out_height = width, height
@@ -361,18 +376,11 @@ def _apply_captions_and_crop(
         # else: no transcript overlap for this window (e.g. silent
         # section) — proceed without captions rather than failing the cut.
 
-    if not vf_parts:
-        return
-
-    post_path = os.path.join(workdir, "post.mp4")
-    cmd = [
-        "ffmpeg", "-y", "-i", trimmed_path,
-        "-vf", ",".join(vf_parts),
-        "-c:v", "libx264", "-preset", "veryfast", "-c:a", "copy",
-        post_path,
-    ]
-    subprocess.run(cmd, check=True, capture_output=True, timeout=120)
-    shutil.move(post_path, trimmed_path)
+    cmd = ["ffmpeg", "-y", "-ss", str(relative_start), "-i", raw_path, "-t", str(duration)]
+    if vf_parts:
+        cmd += ["-vf", ",".join(vf_parts)]
+    cmd += ["-c:v", "libx264", "-crf", "20", "-preset", "fast", "-c:a", "aac", out_path]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=150)
 
 
 @app.route("/api/auth", methods=["POST"])
