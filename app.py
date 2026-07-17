@@ -23,6 +23,7 @@ import datetime
 import functools
 import subprocess
 import tempfile
+from typing import Optional
 
 import stripe
 from flask import Flask, request, jsonify, render_template_string, send_from_directory
@@ -37,6 +38,7 @@ from flask_login import (
 from llm_scorer import score_with_llm
 from discover import build_discover_feed
 from digest import send_digest_emails, generate_unsubscribe_token, verify_unsubscribe_token
+from captions import build_ass_subtitle, chunk_captions_for_clip, STYLE_PRESETS, DEFAULT_STYLE
 
 from clipfind import (
     fetch_youtube_transcript,
@@ -177,12 +179,33 @@ def _to_seconds(value):
     return parse_timestamp(str(value))
 
 
+def _probe_dimensions(path: str):
+    """Returns (width, height) of a video file via ffprobe (bundled
+    alongside ffmpeg). Needed before burning captions/cropping since the
+    .ass file's PlayResX/Y and the crop filter's math both depend on the
+    actual pixel dimensions of what's about to be re-encoded."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0", path,
+        ],
+        capture_output=True, text=True, timeout=15, check=True,
+    )
+    width_str, height_str = result.stdout.strip().split("x")
+    return int(width_str), int(height_str)
+
+
 def cut_youtube_clip(
     youtube_url: str,
     start_seconds: float,
     end_seconds: float,
     max_seconds: int = 90,
     max_height: int = 480,
+    lines: Optional[list] = None,
+    captions: bool = False,
+    caption_style: str = DEFAULT_STYLE,
+    vertical: bool = False,
 ) -> str:
     """Download just the needed section of a YouTube video with yt-dlp,
     trim it precisely with ffmpeg, and return the filename (inside
@@ -192,7 +215,12 @@ def cut_youtube_clip(
     max_seconds/max_height are tier-gated by the caller (free vs paid) —
     free users get shorter, lower-res clips since actual video download
     is the real Webshare-bandwidth cost, unlike text-only transcript
-    fetches."""
+    fetches.
+
+    captions/caption_style/vertical are the paid-tier extras: burning
+    styled captions in and/or cropping to 9:16 both require a second
+    ffmpeg re-encode pass (can't stream-copy once a video filter's
+    involved), so they're kept optional rather than always running."""
     if end_seconds <= start_seconds:
         raise RuntimeError("End must be after start.")
     if end_seconds - start_seconds > max_seconds:
@@ -271,8 +299,79 @@ def cut_youtube_clip(
             shutil.rmtree(workdir, ignore_errors=True)
             raise RuntimeError("Couldn't trim the video to that time range.")
 
+    if captions or vertical:
+        try:
+            _apply_captions_and_crop(
+                trimmed_path=out_path,
+                workdir=workdir,
+                clip_start=start_seconds,
+                clip_end=end_seconds,
+                lines=lines or [],
+                captions=captions,
+                caption_style=caption_style,
+                vertical=vertical,
+            )
+        except Exception as e:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise RuntimeError(f"Cut the clip, but couldn't apply captions/crop ({e}).")
+
     shutil.rmtree(workdir, ignore_errors=True)
     return f"{clip_id}.mp4"
+
+
+def _apply_captions_and_crop(
+    trimmed_path: str,
+    workdir: str,
+    clip_start: float,
+    clip_end: float,
+    lines: list,
+    captions: bool,
+    caption_style: str,
+    vertical: bool,
+) -> None:
+    """Second re-encode pass over the already-trimmed clip: crops to 9:16
+    (if requested) and/or burns in styled captions (if requested), writing
+    the result back over `trimmed_path`. Runs after the main trim rather
+    than combined into one pass so the (more reliable) stream-copy fast
+    path above is unaffected when neither extra is requested."""
+    width, height = _probe_dimensions(trimmed_path)
+
+    vf_parts = []
+    out_width, out_height = width, height
+
+    if vertical:
+        target_width = round((height * 9 / 16) / 2) * 2  # even width, ffmpeg requirement
+        even_source_width = width - (width % 2)
+        out_width = min(target_width, even_source_width) if target_width > 0 else even_source_width
+        crop_x = max(0, (width - out_width) // 2)
+        vf_parts.append(f"crop={out_width}:{height}:{crop_x}:0")
+        out_height = height
+
+    if captions:
+        chunks = chunk_captions_for_clip(lines, clip_start, clip_end)
+        if chunks:
+            ass_content = build_ass_subtitle(chunks, caption_style, out_width, out_height)
+            ass_path = os.path.join(workdir, "captions.ass")
+            with open(ass_path, "w", encoding="utf-8") as f:
+                f.write(ass_content)
+            # No colons/special chars possible in this path (it's under a
+            # tempfile.mkdtemp() dir), so it's safe unescaped in the filter.
+            vf_parts.append(f"subtitles={ass_path}")
+        # else: no transcript overlap for this window (e.g. silent
+        # section) — proceed without captions rather than failing the cut.
+
+    if not vf_parts:
+        return
+
+    post_path = os.path.join(workdir, "post.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-i", trimmed_path,
+        "-vf", ",".join(vf_parts),
+        "-c:v", "libx264", "-preset", "veryfast", "-c:a", "copy",
+        post_path,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+    shutil.move(post_path, trimmed_path)
 
 
 @app.route("/api/auth", methods=["POST"])
@@ -479,6 +578,9 @@ def cut():
     url = (data.get("youtube_url") or "").strip()
     start = data.get("start")
     end = data.get("end")
+    want_captions = bool(data.get("captions"))
+    caption_style = data.get("caption_style") or DEFAULT_STYLE
+    want_vertical = bool(data.get("vertical"))
 
     if not url or start is None or end is None:
         return jsonify({"error": "Need youtube_url, start, and end."}), 400
@@ -491,11 +593,34 @@ def cut():
             }
         ), 402
 
+    # Captions and vertical crop are paid-tier perks — free tier still
+    # gets the core find-and-cut value, this is an upgrade incentive on
+    # top, same as the longer clip length / higher resolution gating.
+    if (want_captions or want_vertical) and not current_user.is_paid:
+        return jsonify(
+            {
+                "error": "Styled captions and vertical crop are available on the paid plan.",
+                "upgrade_required": True,
+            }
+        ), 402
+
+    if caption_style not in STYLE_PRESETS:
+        caption_style = DEFAULT_STYLE
+
     try:
         start_s = _to_seconds(start)
         end_s = _to_seconds(end)
     except Exception:
         return jsonify({"error": "Couldn't parse start/end time."}), 400
+
+    lines = []
+    if want_captions:
+        try:
+            lines = fetch_youtube_transcript(url)
+        except Exception as e:
+            return jsonify(
+                {"error": f"Couldn't fetch captions for this video ({e}). Try cutting without captions."}
+            ), 502
 
     try:
         filename = cut_youtube_clip(
@@ -504,6 +629,10 @@ def cut():
             end_s,
             max_seconds=current_user.max_clip_seconds(),
             max_height=current_user.max_height(),
+            lines=lines,
+            captions=want_captions,
+            caption_style=caption_style,
+            vertical=want_vertical,
         )
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
@@ -685,6 +814,13 @@ INDEX_HTML = """
   .clip .actions button{padding:8px 14px;font-size:0.82rem;}
   .clip .cut-status{font-size:0.8rem;color:var(--text-dim);}
   .clip .cut-status.error{color:var(--red);}
+  .clip .style-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px;font-size:0.82rem;color:var(--text-dim);}
+  .clip .style-controls select{
+    padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:#0d0d13;color:var(--text);font-size:0.82rem;
+  }
+  .clip .style-controls label{display:flex;align-items:center;gap:5px;cursor:pointer;}
+  .clip .style-controls.locked{opacity:0.55;}
+  .clip .style-controls .lock-note{color:var(--accent);cursor:pointer;text-decoration:underline;}
   .clip video{margin-top:12px;width:100%;border-radius:8px;display:block;}
   .clip .dl-link{font-size:0.82rem;color:var(--green);}
   .footer-note{margin-top:28px;text-align:center;color:var(--text-dim);font-size:0.8rem;}
@@ -961,21 +1097,24 @@ if (new URLSearchParams(window.location.search).get('tab') === 'discover') {
   switchTab('discover');
 }
 
-async function cutClip(youtubeUrl, start, end, statusNode, videoWrap) {
+async function cutClip(youtubeUrl, start, end, statusNode, videoWrap, extras) {
   statusNode.className = 'cut-status';
-  statusNode.textContent = 'Cutting the clip from the video (this can take a bit)...';
+  const willStyle = extras && (extras.captions || extras.vertical);
+  statusNode.textContent = willStyle
+    ? 'Cutting and styling the clip (captions/crop take a bit longer)...'
+    : 'Cutting the clip from the video (this can take a bit)...';
   try {
     const res = await fetch('/api/cut', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ youtube_url: youtubeUrl, start, end }),
+      body: JSON.stringify({ youtube_url: youtubeUrl, start, end, ...(extras || {}) }),
     });
     const data = await res.json();
     if (!res.ok) {
       statusNode.className = 'cut-status error';
       if (data.auth_required) {
         statusNode.textContent = 'Sign in above first.';
-      } else if (data.limit_reached) {
+      } else if (data.limit_reached || data.upgrade_required) {
         statusNode.textContent = data.error;
         upgradeBtn.scrollIntoView({ behavior: 'smooth' });
       } else {
@@ -998,6 +1137,12 @@ async function cutClip(youtubeUrl, start, end, statusNode, videoWrap) {
   }
 }
 
+const CAPTION_STYLES = [
+  { value: 'bold_impact', label: 'Bold Impact' },
+  { value: 'karaoke_highlight', label: 'Karaoke Highlight' },
+  { value: 'boxed', label: 'Boxed' },
+];
+
 function renderClips(clips, isYoutube) {
   resultsEl.innerHTML = '';
   clips.forEach((c) => {
@@ -1008,6 +1153,7 @@ function renderClips(clips, isYoutube) {
       <div class="hook">"${c.hook}"</div>
       ${c.reasoning ? `<div class="reasoning">🧠 ${c.reasoning}</div>` : ''}
       <div class="preview">${c.preview}</div>
+      <div class="style-controls"></div>
       <div class="actions"></div>
       <div class="cut-status"></div>
       <div class="video-wrap"></div>
@@ -1017,14 +1163,54 @@ function renderClips(clips, isYoutube) {
     const actions = div.querySelector('.actions');
     const cutStatus = div.querySelector('.cut-status');
     const videoWrap = div.querySelector('.video-wrap');
+    const styleControls = div.querySelector('.style-controls');
 
     if (isYoutube) {
+      const isPaid = session.is_paid;
+      const styleSelect = document.createElement('select');
+      CAPTION_STYLES.forEach((s) => {
+        const opt = document.createElement('option');
+        opt.value = s.value;
+        opt.textContent = s.label;
+        styleSelect.appendChild(opt);
+      });
+      const captionsLabel = document.createElement('label');
+      const captionsCheck = document.createElement('input');
+      captionsCheck.type = 'checkbox';
+      captionsLabel.appendChild(captionsCheck);
+      captionsLabel.append(' Captions');
+
+      const verticalLabel = document.createElement('label');
+      const verticalCheck = document.createElement('input');
+      verticalCheck.type = 'checkbox';
+      verticalLabel.appendChild(verticalCheck);
+      verticalLabel.append(' Vertical (9:16)');
+
+      styleControls.appendChild(captionsLabel);
+      styleControls.appendChild(styleSelect);
+      styleControls.appendChild(verticalLabel);
+
+      if (!isPaid) {
+        styleControls.classList.add('locked');
+        captionsCheck.disabled = true;
+        verticalCheck.disabled = true;
+        styleSelect.disabled = true;
+        const lockNote = document.createElement('span');
+        lockNote.className = 'lock-note';
+        lockNote.textContent = 'Upgrade to unlock styled captions & vertical crop';
+        lockNote.addEventListener('click', () => upgradeBtn.scrollIntoView({ behavior: 'smooth' }));
+        styleControls.appendChild(lockNote);
+      }
+
       const cutBtn = document.createElement('button');
       cutBtn.className = 'secondary';
       cutBtn.textContent = 'Cut & download this clip';
       cutBtn.addEventListener('click', () => {
         cutBtn.disabled = true;
-        cutClip(lastYoutubeUrl, c.start_seconds, c.end_seconds, cutStatus, videoWrap)
+        const extras = isPaid
+          ? { captions: captionsCheck.checked, caption_style: styleSelect.value, vertical: verticalCheck.checked }
+          : {};
+        cutClip(lastYoutubeUrl, c.start_seconds, c.end_seconds, cutStatus, videoWrap, extras)
           .finally(() => { cutBtn.disabled = false; });
       });
       actions.appendChild(cutBtn);

@@ -76,6 +76,12 @@ class Line:
     text: str
     score: float = 0.0
     hits: List[str] = field(default_factory=list)
+    # When available (YouTube auto-captions), the timestamp the underlying
+    # speech actually ends — used by captions.py to time burned-in caption
+    # display windows. None for plain-text-file transcripts (load_transcript
+    # has no duration data), in which case caption timing falls back to a
+    # words-per-second estimate.
+    end: Optional[float] = None
 
 
 @dataclass
@@ -165,16 +171,18 @@ def merge_fragments(entries: list, max_words: int = 20, max_gap: float = 2.0) ->
     lines: List[Line] = []
     buf_text: List[str] = []
     buf_start: Optional[float] = None
+    buf_end: Optional[float] = None
     prev_end = 0.0
 
     def flush():
-        nonlocal buf_text, buf_start
+        nonlocal buf_text, buf_start, buf_end
         if buf_text:
             text = " ".join(buf_text).strip()
             if text:
-                lines.append(Line(timestamp=buf_start or 0.0, text=text))
+                lines.append(Line(timestamp=buf_start or 0.0, text=text, end=buf_end))
         buf_text = []
         buf_start = None
+        buf_end = None
 
     for e in entries:
         text = getattr(e, "text", None) if not isinstance(e, dict) else e.get("text", "")
@@ -193,6 +201,7 @@ def merge_fragments(entries: list, max_words: int = 20, max_gap: float = 2.0) ->
 
         buf_text.append(text)
         prev_end = start + duration
+        buf_end = prev_end
 
         word_count = sum(len(t.split()) for t in buf_text)
         if text.rstrip().endswith((".", "!", "?")) or word_count >= max_words:
