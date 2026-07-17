@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClipFind — AI clip finder</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+
+<!-- Pre-login screen -->
+<div class="auth-screen" id="authScreen">
+  <div class="box panel">
+    <div class="logo">Clip<span>Find</span></div>
+    <div class="tag">Paste a YouTube link. Get the moments worth clipping.</div>
+    <div class="row">
+      <input type="email" id="authEmail" placeholder="you@email.com" />
+      <input type="password" id="authPassword" placeholder="password (6+ characters)" />
+      <button id="authBtn">Continue</button>
+    </div>
+    <div class="status" id="authStatus"></div>
+    <div class="auth-note">New here? This creates your account. Already have one? This logs you in. 3 free clips a day, no card needed.</div>
+  </div>
+</div>
+
+<!-- Main dashboard shell (shown once logged in) -->
+<div class="app" id="appShell" style="display:none;">
+  <div class="sidebar">
+    <div class="sidebar-logo">Clip<span>Find</span></div>
+    <button class="new-project-btn" id="newProjectBtn">+ New Project</button>
+
+    <div class="nav-group">
+      <button class="nav-item active" data-view="dashboard"><span class="icon">&#9679;</span> Dashboard</button>
+      <button class="nav-item" data-view="projects"><span class="icon">&#9636;</span> Projects</button>
+      <button class="nav-item" data-view="focusmode"><span class="icon">&#9673;</span> AI Focus Mode</button>
+      <button class="nav-item" data-view="timeline"><span class="icon">&#9135;</span> Timeline</button>
+      <button class="nav-item" data-view="discover"><span class="icon">&#9650;</span> Discover</button>
+      <button class="nav-item" data-view="collections"><span class="icon">&#9783;</span> Collections</button>
+      <button class="nav-item" data-view="exports"><span class="icon">&#8595;</span> Exports</button>
+    </div>
+
+    <div class="nav-group">
+      <button class="nav-item" data-view="templates"><span class="icon">&#9638;</span> Templates <span class="soon-badge">soon</span></button>
+      <button class="nav-item" data-view="analytics"><span class="icon">&#9776;</span> Analytics <span class="soon-badge">soon</span></button>
+      <button class="nav-item" data-view="team"><span class="icon">&#9787;</span> Team <span class="soon-badge">soon</span></button>
+      <button class="nav-item" data-view="settings"><span class="icon">&#9881;</span> Settings</button>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="plan-card">
+        <div class="plan-name" id="planName">Free plan</div>
+        <div class="plan-usage" id="planUsage">—</div>
+        <div class="plan-bar"><div class="plan-bar-fill" id="planBarFill" style="width:0%;"></div></div>
+        <button id="sidebarUpgradeBtn" style="display:none;">Upgrade — unlimited</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <h1 id="topbarTitle">Dashboard</h1>
+      <div class="account-info" id="accountInfo"></div>
+    </div>
+
+    <div class="content">
+
+      <!-- Dashboard view -->
+      <div class="view active" id="view-dashboard">
+        <div class="placeholder-card panel">
+          <div class="big-icon">&#128075;</div>
+          <h2>Welcome back</h2>
+          <p>Paste a YouTube link under Projects to find clip-worthy moments, or check Discover for videos trending right now that are worth clipping.</p>
+        </div>
+      </div>
+
+      <!-- Projects view: the core paste-a-link -> analyze -> results flow -->
+      <div class="view" id="view-projects">
+        <div class="panel">
+          <div class="row">
+            <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
+            <button id="analyzeBtn">Find clips</button>
+            <button id="demoBtn" class="secondary">Try demo</button>
+          </div>
+          <div class="status" id="status"></div>
+          <div class="results" id="results"></div>
+        </div>
+      </div>
+
+      <!-- Focus Mode view: placeholder -->
+      <div class="view" id="view-focusmode">
+        <div class="placeholder-card panel">
+          <div class="big-icon">&#9673;</div>
+          <h2>AI Focus Mode</h2>
+          <p>Tell the AI exactly what kind of moment to find within a video — "every time he laughs," "find every argument," or a preset category. In development.</p>
+        </div>
+      </div>
+
+      <!-- Timeline view: placeholder -->
+      <div class="view" id="view-timeline">
+        <div class="placeholder-card panel">
+          <div class="big-icon">&#9135;</div>
+          <h2>Timeline</h2>
+          <p>A scrubber across the whole video with colored markers for every detected moment — hover to preview, click to jump. In development.</p>
+        </div>
+      </div>
+
+      <!-- Discover view -->
+      <div class="view" id="view-discover">
+        <div class="panel">
+          <div class="row" style="justify-content:space-between;">
+            <div style="color:var(--text-dim);">Videos outperforming right now — worth clipping today.</div>
+            <button class="secondary" id="refreshDiscoverBtn">Refresh</button>
+          </div>
+          <div class="status" id="discoverStatus"></div>
+          <div class="results" id="discoverResults"></div>
+        </div>
+      </div>
+
+      <!-- Collections view: placeholder -->
+      <div class="view" id="view-collections">
+        <div class="placeholder-card panel">
+          <div class="big-icon">&#9783;</div>
+          <h2>Collections</h2>
+          <p>Clips automatically grouped — "Top 10 Funniest Moments," "Top 8 Rage Moments" — so a long video turns into a searchable library. In development.</p>
+        </div>
+      </div>
+
+      <!-- Exports view: placeholder -->
+      <div class="view" id="view-exports">
+        <div class="placeholder-card panel">
+          <div class="big-icon">&#8595;</div>
+          <h2>Exports</h2>
+          <p>Export presets optimized for TikTok, YouTube Shorts, and Instagram Reels, plus auto-generated titles, hashtags, and descriptions. In development.</p>
+        </div>
+      </div>
+
+      <!-- Coming soon views -->
+      <div class="view" id="view-templates">
+        <div class="placeholder-card panel">
+          <div class="big-icon">&#9638;</div>
+          <h2>Templates</h2>
+          <p>Reusable caption/crop/export presets for teams. Coming with the Agency plan.</p>
+        </div>
+      </div>
+      <div class="view" id="view-analytics">
+        <div class="placeholder-card panel">
+          <div class="big-icon">&#9776;</div>
+          <h2>Analytics</h2>
+          <p>Performance tracking across published clips. Coming with the Agency plan.</p>
+        </div>
+      </div>
+      <div class="view" id="view-team">
+        <div class="placeholder-card panel">
+          <div class="big-icon">&#9787;</div>
+          <h2>Team</h2>
+          <p>Shared workspaces, client folders, and permissions. Coming with the Agency plan.</p>
+        </div>
+      </div>
+
+      <!-- Settings view -->
+      <div class="view" id="view-settings">
+        <div class="panel">
+          <h2 style="margin-bottom:16px;">Account</h2>
+          <div class="status" id="settingsInfo" style="color:var(--text);margin-bottom:16px;"></div>
+          <div class="row">
+            <button id="settingsUpgradeBtn" style="display:none;">Upgrade — unlimited</button>
+            <button class="secondary" id="logoutBtn">Log out</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
