@@ -260,6 +260,46 @@ def fetch_youtube_transcript(url_or_id: str, languages=("en",)) -> List[Line]:
     return merge_fragments(raw)
 
 
+def fetch_youtube_transcript_raw(url_or_id: str, languages=("en",)) -> List[Line]:
+    """Fetch a YouTube video's transcript WITHOUT merging fragments into
+    sentences — one Line per raw caption fragment (YouTube's own
+    ~2-8-word chunks), each carrying its own real start/end.
+
+    This is what captions.py uses for burned-in caption timing, not
+    fetch_youtube_transcript()'s merged sentence Lines. Merging is right
+    for scoring (regex rules need real sentences), but it's wrong for
+    caption sync: once several fragments get glued into one long Line,
+    the only timing data left is the merged line's overall start/end, so
+    word-level timing within it has to be *estimated* (proportional to
+    character count) rather than using YouTube's own real per-fragment
+    timestamps — which reads as visible drift once speech speeds up or
+    slows down. Raw fragments track actual speech pacing far more
+    closely since they're small enough that estimation error within each
+    one stays tiny."""
+    try:
+        api = _build_transcript_api()
+    except ImportError:
+        raise RuntimeError(
+            "youtube-transcript-api isn't installed. Run: pip install youtube-transcript-api"
+        )
+
+    video_id = extract_video_id(url_or_id)
+    raw = api.fetch(video_id, languages=list(languages))
+
+    lines: List[Line] = []
+    for e in raw:
+        text = getattr(e, "text", None) if not isinstance(e, dict) else e.get("text", "")
+        start = getattr(e, "start", None) if not isinstance(e, dict) else e.get("start", 0.0)
+        duration = getattr(e, "duration", 0.0) if not isinstance(e, dict) else e.get("duration", 0.0)
+        text = (text or "").strip().replace("\n", " ")
+        if not text:
+            continue
+        lines.append(Line(timestamp=start, text=text, end=start + duration))
+
+    lines.sort(key=lambda l: l.timestamp)
+    return lines
+
+
 def score_line(line: Line) -> Line:
     score = 0.0
     hits = []

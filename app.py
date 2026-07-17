@@ -42,6 +42,7 @@ from captions import build_ass_subtitle, chunk_captions_for_clip, STYLE_PRESETS,
 
 from clipfind import (
     fetch_youtube_transcript,
+    fetch_youtube_transcript_raw,
     load_transcript,
     score_transcript,
     build_clips,
@@ -629,7 +630,10 @@ def cut():
     lines = []
     if want_captions:
         try:
-            lines = fetch_youtube_transcript(url)
+            # Raw (unmerged) fragments, not the sentence-merged transcript
+            # /api/analyze uses — captions need YouTube's real per-fragment
+            # timestamps to stay in sync, merging loses that granularity.
+            lines = fetch_youtube_transcript_raw(url)
         except Exception as e:
             return jsonify(
                 {"error": f"Couldn't fetch captions for this video ({e}). Try cutting without captions."}

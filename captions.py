@@ -106,20 +106,39 @@ def chunk_captions_for_clip(
     """Turns transcript Lines overlapping [clip_start, clip_end] into short
     on-screen caption chunks (a few words each, like real burned-in
     captions use) with per-word timing, all relative to clip_start (i.e.
-    ready to drop straight into the cut clip's own 0-based timeline)."""
+    ready to drop straight into the cut clip's own 0-based timeline).
+
+    Pass fetch_youtube_transcript_raw()'s per-fragment Lines here, not the
+    merged sentence Lines from fetch_youtube_transcript() — raw fragments
+    are small enough that the within-fragment timing estimate stays close
+    to real speech pacing, whereas estimating word timing across a whole
+    merged sentence drifts noticeably once speech speeds up or slows
+    down. Works with merged Lines too (e.g. the plain-text CLI transcript
+    path has no raw fragments to fall back on), just less precisely."""
     clip_dur = clip_end - clip_start
     if clip_dur <= 0:
         return []
 
-    chunks = []
-    for line in lines:
-        if line.timestamp >= clip_end:
-            continue
+    ordered = sorted(lines, key=lambda l: l.timestamp)
+
+    # Compute each line's effective end, then clamp it to the next line's
+    # start. Without this, overlapping source timestamps (YouTube's raw
+    # captions do this sometimes) or an overestimated fallback duration
+    # both lead to two caption windows being "on screen" at once — which
+    # is what burns in as stacked/overlapping text.
+    spans = []
+    for i, line in enumerate(ordered):
         raw_end = (
             line.end if getattr(line, "end", None) is not None
             else line.timestamp + max(1.0, len(line.text.split()) / 2.5)
         )
-        if raw_end <= clip_start:
+        if i + 1 < len(ordered):
+            raw_end = min(raw_end, ordered[i + 1].timestamp)
+        spans.append((line, raw_end))
+
+    chunks = []
+    for line, raw_end in spans:
+        if line.timestamp >= clip_end or raw_end <= clip_start:
             continue
         line_start = max(line.timestamp, clip_start)
         line_end = min(raw_end, clip_end)
@@ -155,6 +174,15 @@ def chunk_captions_for_clip(
         for w in c["words"]:
             w["rel_start"] = round(max(0.0, min(w["rel_start"], clip_dur)), 3)
             w["rel_end"] = round(max(w["rel_start"] + 0.02, min(w["rel_end"], clip_dur)), 3)
+
+    # Belt-and-suspenders: also clamp consecutive *chunks* against each
+    # other (word-grouping or the per-line clamp above can still leave a
+    # sliver of overlap at a boundary) so no two chunks ever render at
+    # once regardless of source data quirks.
+    chunks.sort(key=lambda c: c["rel_start"])
+    for i in range(len(chunks) - 1):
+        if chunks[i]["rel_end"] > chunks[i + 1]["rel_start"]:
+            chunks[i]["rel_end"] = max(chunks[i]["rel_start"] + 0.05, chunks[i + 1]["rel_start"])
 
     return chunks
 
