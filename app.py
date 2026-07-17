@@ -470,10 +470,23 @@ def stripe_webhook():
     event_type = event["type"] if isinstance(event, dict) else event.type
     data_object = event["data"]["object"] if isinstance(event, dict) else event.data.object
 
+    # Not using data_object.get(...) here on purpose: newer stripe-python
+    # versions' StripeObject no longer behaves like a real dict for
+    # attribute access — calling .get(...) on it raises AttributeError
+    # ("get" gets treated as a missing key, not a method call), which was
+    # crashing this whole route with a 500 (confirmed live via Stripe's
+    # webhook delivery log + Render's traceback). Plain dicts (the
+    # no-secret JSON fallback path above) still support .get() fine, so
+    # this helper handles both shapes safely.
+    def field(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
     if event_type == "checkout.session.completed":
-        user_id = data_object.get("client_reference_id")
-        customer_id = data_object.get("customer")
-        subscription_id = data_object.get("subscription")
+        user_id = field(data_object, "client_reference_id")
+        customer_id = field(data_object, "customer")
+        subscription_id = field(data_object, "subscription")
         if user_id:
             user = db.session.get(User, int(user_id))
             if user:
@@ -483,8 +496,8 @@ def stripe_webhook():
                 db.session.commit()
 
     elif event_type in ("customer.subscription.deleted", "customer.subscription.updated"):
-        status = data_object.get("status")
-        customer_id = data_object.get("customer")
+        status = field(data_object, "status")
+        customer_id = field(data_object, "customer")
         user = User.query.filter_by(stripe_customer_id=customer_id).first()
         if user:
             user.is_paid = status in ("active", "trialing")
