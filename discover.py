@@ -32,25 +32,39 @@ YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 
 # Curated niches matching the clipping/creator audience this tool is
 # built for, rather than an open-ended search box — keeps results
-# relevant and keeps API quota usage bounded and predictable.
-NICHES = [
-    "podcast interview",
-    "motivational speech",
-    "business advice",
-    "startup founder interview",
-]
+# relevant and keeps API quota usage bounded and predictable. Grouped
+# under category keys so the frontend can offer a genre filter (Gaming,
+# Comedy, etc.) over a single shared feed refresh instead of needing a
+# separate YouTube search — and separate quota spend — per category per
+# visitor. Each category maps to a list so a category can later gain a
+# second query without restructuring anything.
+CATEGORY_NICHES: Dict[str, List[str]] = {
+    "podcasts": ["podcast interview"],
+    "business": ["business advice"],
+    "motivation": ["motivational speech"],
+    "startups": ["startup founder interview"],
+    "gaming": ["gaming highlights"],
+    "comedy": ["stand up comedy funny moments"],
+    "sports": ["sports highlights"],
+    "education": ["educational explainer"],
+}
 
 LOOKBACK_HOURS = 48  # only consider videos published in this window
 CANDIDATES_PER_NICHE = 6
-FEED_SIZE = 8  # how many final picks to show/store
+FEED_SIZE = 16  # how many final picks to show/store — bumped alongside the
+# category split below so each of the 8 categories has a reasonable shot
+# at showing up rather than a small shared pool getting dominated by
+# whichever niche happens to have the highest-velocity videos this hour.
 
 # Scoring each candidate (transcript fetch + LLM call) is the slow part —
 # doing it one at a time for up to ~24 candidates can take minutes and blow
 # past the server's request timeout. Two guardrails: only ever attempt a
 # bounded number of candidates regardless of how many fail, and run the
 # attempts concurrently (they're I/O-bound network calls, so threads are
-# enough — no need for real parallelism).
-MAX_CANDIDATES_TO_ATTEMPT = 14
+# enough — no need for real parallelism). Set to 2x the category count so
+# the round-robin selection below (see build_discover_feed) can give every
+# category up to 2 scoring attempts before any category gets a 3rd.
+MAX_CANDIDATES_TO_ATTEMPT = 16
 SCORING_CONCURRENCY = 6
 
 
@@ -179,15 +193,22 @@ def _best_clip_for_video(video_id: str) -> Optional[dict]:
 
 
 def build_discover_feed(feed_size: int = FEED_SIZE) -> List[dict]:
-    """Search across the curated niches, rank candidates by view
-    velocity, then run the top handful through the real clip scorer.
-    Returns a list of dicts ready to store/serve — raises on total
-    failure (e.g. bad/missing API key) so the caller can decide how to
-    handle an empty feed."""
+    """Search across the curated category niches, then run a
+    round-robin-selected slice of candidates through the real clip
+    scorer. Returns a list of dicts ready to store/serve — raises on
+    total failure (e.g. bad/missing API key) so the caller can decide
+    how to handle an empty feed."""
     api_key = _api_key()
 
+    niche_to_category = {
+        niche: category
+        for category, niches in CATEGORY_NICHES.items()
+        for niche in niches
+    }
+
     all_candidates: Dict[str, dict] = {}
-    for niche in NICHES:
+    video_ids_by_niche: Dict[str, List[str]] = {}
+    for niche, category in niche_to_category.items():
         try:
             video_ids = _search_recent_videos(niche, api_key, max_results=CANDIDATES_PER_NICHE)
         except requests.RequestException as e:
@@ -199,9 +220,11 @@ def build_discover_feed(feed_size: int = FEED_SIZE) -> List[dict]:
             continue
         stats = _get_video_stats(video_ids, api_key)
         all_candidates.update(stats)
+        video_ids_by_niche[niche] = list(stats.keys())
         for vid, info in stats.items():
             info["video_id"] = vid
             info["niche"] = niche
+            info["category"] = category
 
     if not all_candidates:
         return []
@@ -209,23 +232,43 @@ def build_discover_feed(feed_size: int = FEED_SIZE) -> List[dict]:
     channel_ids = [info["channel_id"] for info in all_candidates.values()]
     subs = _get_channel_subscriber_counts(channel_ids, api_key)
 
-    ranked = []
-    for vid, info in all_candidates.items():
+    for info in all_candidates.values():
         sub_count = subs.get(info["channel_id"], 0)
         info["velocity_score"] = _velocity_score(
             info["view_count"], info["published_at"], sub_count
         )
         info["subscriber_count"] = sub_count
-        ranked.append(info)
 
-    ranked.sort(key=lambda x: x["velocity_score"], reverse=True)
+    # Rank candidates within each niche separately (not just globally) so
+    # the round-robin below can pull fairly from every category.
+    ranked_by_niche: Dict[str, List[dict]] = {}
+    for niche, vids in video_ids_by_niche.items():
+        items = [all_candidates[v] for v in vids if v in all_candidates]
+        items.sort(key=lambda x: x["velocity_score"], reverse=True)
+        ranked_by_niche[niche] = items
 
-    # Only attempt scoring on a bounded slice of the ranked list — trying
-    # every single candidate (transcript fetch + LLM call each) is what
-    # was pushing this past the request timeout. Attempting them
-    # concurrently instead of one-by-one is what actually keeps wall time
-    # down; the cap is just a backstop for a genuinely bad batch.
-    to_attempt = ranked[:MAX_CANDIDATES_TO_ATTEMPT]
+    # Round-robin one candidate per niche per pass, instead of ranking
+    # every candidate globally by velocity and taking the top N. A pure
+    # global ranking tends to let a couple of naturally higher-velocity
+    # niches (gaming/comedy content usually spikes harder than, say,
+    # business advice) crowd out every scoring slot — which would leave
+    # other category filters on the frontend empty most of the time.
+    # This guarantees every niche gets at least one shot at being scored
+    # before any niche gets a second.
+    to_attempt: List[dict] = []
+    niche_order = list(ranked_by_niche.keys())
+    round_idx = 0
+    while len(to_attempt) < MAX_CANDIDATES_TO_ATTEMPT:
+        added_this_round = False
+        for niche in niche_order:
+            if round_idx < len(ranked_by_niche[niche]):
+                to_attempt.append(ranked_by_niche[niche][round_idx])
+                added_this_round = True
+                if len(to_attempt) >= MAX_CANDIDATES_TO_ATTEMPT:
+                    break
+        if not added_this_round:
+            break  # every niche's candidate list is exhausted
+        round_idx += 1
 
     results: Dict[str, Optional[dict]] = {}
     with ThreadPoolExecutor(max_workers=SCORING_CONCURRENCY) as pool:

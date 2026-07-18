@@ -224,6 +224,11 @@ input:focus { outline: none; border-color: var(--accent); }
   cursor: pointer;
 }
 .preset-chip:hover { border-color: var(--accent); color: var(--text); }
+.preset-chip.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  border-color: transparent;
+  color: #fff;
+}
 
 /* ---------- Timeline ---------- */
 .timeline-legend { display: flex; gap: 14px; font-size: 0.75rem; color: var(--text-dim); flex-shrink: 0; }

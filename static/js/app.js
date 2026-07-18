@@ -32,6 +32,7 @@ const urlInput = document.getElementById('urlInput');
 const discoverStatus = document.getElementById('discoverStatus');
 const discoverResults = document.getElementById('discoverResults');
 const refreshDiscoverBtn = document.getElementById('refreshDiscoverBtn');
+const discoverCategoryChips = document.getElementById('discoverCategoryChips');
 
 const timelineStatus = document.getElementById('timelineStatus');
 const timelineWrap = document.getElementById('timelineWrap');
@@ -48,6 +49,9 @@ const focusPresets = document.getElementById('focusPresets');
 let session = { logged_in: false };
 let lastYoutubeUrl = null; // set when the results came from a real video, not the demo
 let discoverLoaded = false;
+let lastDiscoverFeed = []; // full unfiltered feed from the last fetch — category chips filter this client-side, no refetch
+let lastDiscoverComputedAt = null;
+let activeDiscoverCategory = 'all';
 let lastAnalyzeData = null; // { clips, video_duration, isYoutube } from the most recent /api/analyze or /api/demo — feeds the Timeline view
 
 // ---------------------------------------------------------------------
@@ -200,13 +204,58 @@ settingsUpgradeBtn.addEventListener('click', () => startCheckout(settingsUpgrade
 // ---------------------------------------------------------------------
 // Discover
 // ---------------------------------------------------------------------
+const DISCOVER_CATEGORIES = [
+  { key: 'all', label: 'All' },
+  { key: 'podcasts', label: 'Podcasts' },
+  { key: 'business', label: 'Business' },
+  { key: 'motivation', label: 'Motivation' },
+  { key: 'startups', label: 'Startups' },
+  { key: 'gaming', label: 'Gaming' },
+  { key: 'comedy', label: 'Comedy' },
+  { key: 'sports', label: 'Sports' },
+  { key: 'education', label: 'Education' },
+];
+
+function renderDiscoverCategoryChips() {
+  discoverCategoryChips.innerHTML = '';
+  DISCOVER_CATEGORIES.forEach((cat) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'preset-chip' + (cat.key === activeDiscoverCategory ? ' active' : '');
+    chip.textContent = cat.label;
+    chip.addEventListener('click', () => {
+      if (activeDiscoverCategory === cat.key) return;
+      activeDiscoverCategory = cat.key;
+      renderDiscoverCategoryChips();
+      renderDiscover(lastDiscoverFeed);
+    });
+    discoverCategoryChips.appendChild(chip);
+  });
+}
+renderDiscoverCategoryChips();
+
 function renderDiscover(feed) {
+  lastDiscoverFeed = feed;
+  const activeLabel = (DISCOVER_CATEGORIES.find((c) => c.key === activeDiscoverCategory) || {}).label || 'All';
+  const filtered = activeDiscoverCategory === 'all' ? feed : feed.filter((p) => p.category === activeDiscoverCategory);
+
   discoverResults.innerHTML = '';
+  discoverStatus.className = 'status';
+
   if (!feed.length) {
     discoverStatus.textContent = 'No picks available right now — try refreshing in a bit.';
     return;
   }
-  feed.forEach((pick) => {
+  if (!filtered.length) {
+    discoverStatus.textContent = `No picks in ${activeLabel} right now — try "All" or refresh in a bit.`;
+    return;
+  }
+
+  const updatedNote = lastDiscoverComputedAt ? ` · updated ${new Date(lastDiscoverComputedAt).toLocaleString()}` : '';
+  const categoryNote = activeDiscoverCategory !== 'all' ? ` in ${activeLabel}` : '';
+  discoverStatus.textContent = `${filtered.length} pick${filtered.length === 1 ? '' : 's'}${categoryNote}${updatedNote}`;
+
+  filtered.forEach((pick) => {
     const div = document.createElement('div');
     const clip = pick.clip || {};
     div.className = pick.thumbnail ? 'feed-slide' : 'feed-slide no-thumb';
@@ -249,7 +298,7 @@ async function loadDiscover(forceRefresh) {
       return;
     }
     discoverLoaded = true;
-    discoverStatus.textContent = `${data.feed.length} picks · updated ${data.computed_at ? new Date(data.computed_at).toLocaleString() : 'just now'}`;
+    lastDiscoverComputedAt = data.computed_at || null;
     renderDiscover(data.feed);
   } catch (e) {
     discoverStatus.className = 'status error';
