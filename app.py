@@ -17,6 +17,7 @@ note in DEPLOY.md about sandboxed environments that block that).
 
 import os
 import json
+import time
 import uuid
 import shutil
 import datetime
@@ -51,6 +52,7 @@ from clipfind import (
     build_clips,
     fmt_timestamp,
     parse_timestamp,
+    _is_transient_proxy_error,
 )
 from models import (
     db,
@@ -366,17 +368,47 @@ def cut_youtube_clip(
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        # Left unset, yt-dlp's own defaults (10 retries, no socket
+        # timeout) mean a stalled/flaky proxy connection can make a
+        # single ydl.download() call hang for minutes before it ever
+        # raises anything we can catch — which shows up client-side as a
+        # generic "network error" with zero diagnostic info, since the
+        # request just times out before Flask gets a chance to respond.
+        # Bounding both keeps worst-case latency predictable: a bad exit
+        # IP fails within seconds instead of retrying into a multi-minute
+        # hang.
+        "socket_timeout": 15,
+        "retries": 3,
+        "fragment_retries": 3,
     }
     proxy = get_proxy_url()
     if proxy:
         ydl_opts["proxy"] = proxy
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
-    except Exception as e:
+    # Same fresh-connection-per-retry approach as the transcript fetch in
+    # clipfind.py: a rotating residential proxy hands out a new exit IP
+    # per new connection, so retrying with a brand new YoutubeDL instance
+    # (rather than one shared connection) actually gets a shot at a
+    # different, un-flagged IP instead of hammering the same one. Bounded
+    # socket_timeout/retries above keep each attempt from hanging.
+    download_error = None
+    for attempt in range(3):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([youtube_url])
+            download_error = None
+            break
+        except Exception as e:
+            download_error = e
+            msg = str(e)
+            print(f"[CUT_DOWNLOAD_FAILED] attempt={attempt + 1} url={youtube_url!r} {type(e).__name__}: {e}", flush=True)
+            if not _is_transient_proxy_error(msg) or attempt == 2:
+                break
+            time.sleep(1.5 * (attempt + 1))
+
+    if download_error is not None:
         shutil.rmtree(workdir, ignore_errors=True)
-        msg = str(e)
+        msg = str(download_error)
         if "blocking requests from your IP" in msg or "Sign in to confirm" in msg or "not a bot" in msg:
             raise RuntimeError(
                 "YouTube is blocking video downloads from this server's IP — check the "
