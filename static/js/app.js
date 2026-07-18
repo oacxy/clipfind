@@ -208,14 +208,18 @@ function renderDiscover(feed) {
   }
   feed.forEach((pick) => {
     const div = document.createElement('div');
-    div.className = 'discover-card';
     const clip = pick.clip || {};
+    div.className = pick.thumbnail ? 'feed-slide' : 'feed-slide no-thumb';
+    if (pick.thumbnail) {
+      div.style.backgroundImage = `url('${pick.thumbnail}')`;
+    }
     div.innerHTML = `
-      ${pick.thumbnail ? `<img src="${pick.thumbnail}" alt="">` : ''}
-      <div class="dinfo">
-        <div class="dmeta">${pick.channel_title} · <span class="velocity">${pick.velocity_score}x</span> normal velocity</div>
-        <div class="dtitle">${pick.title}</div>
-        <div class="dclip">🧠 <b>${clip.hook || 'Clip found'}</b> — ${clip.reasoning || ''}</div>
+      <div class="feed-scrim"></div>
+      <div class="feed-top-badges"><span class="velocity-pill">🔥 ${pick.velocity_score}x normal</span></div>
+      <div class="feed-overlay">
+        <div class="feed-channel">${pick.channel_title}</div>
+        <div class="feed-title">${pick.title}</div>
+        <div class="feed-clip">🧠 <b>${clip.hook || 'Clip found'}</b> — ${clip.reasoning || ''}</div>
         <button class="secondary open-btn">Analyze this video</button>
       </div>
     `;
