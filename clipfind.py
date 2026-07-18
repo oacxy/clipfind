@@ -269,14 +269,32 @@ def _is_transient_proxy_error(msg: str) -> bool:
     )
 
 
-def _fetch_raw_with_retry(api, video_id: str, languages, max_retries: int = 3):
-    """Retries api.fetch() on transient-looking proxy/network failures,
-    with a short backoff between attempts. Real, permanent failures
-    (disabled captions, no proxy configured at all) raise immediately on
-    the first try — no point burning three attempts on something that
-    will never succeed."""
+def _fetch_raw_with_retry(video_id: str, languages, max_retries: int = 3):
+    """Retries on transient-looking proxy/network failures, with a short
+    backoff between attempts.
+
+    Builds a FRESH YouTubeTranscriptApi (and therefore a fresh
+    connection) on every attempt, instead of reusing one api object
+    across retries. A rotating residential proxy like Webshare's hands
+    out a new exit IP per new connection — reusing the same connection
+    across all 3 retries meant that if the first exit IP got hit with
+    Google's bot-detection wall (429s / the /sorry/ CAPTCHA redirect),
+    every retry was likely hammering that *same* flagged IP again
+    instead of actually rotating, defeating the whole point of a
+    rotating proxy. Confirmed via a live [TRANSCRIPT_FETCH_FAILED] log
+    showing exactly that failure mode.
+
+    Real, permanent failures (disabled captions, no proxy configured at
+    all) raise immediately on the first try — no point burning three
+    attempts on something that will never succeed."""
     last_error = None
     for attempt in range(max_retries):
+        try:
+            api = _build_transcript_api()
+        except ImportError:
+            raise RuntimeError(
+                "youtube-transcript-api isn't installed. Run: pip install youtube-transcript-api"
+            )
         try:
             return api.fetch(video_id, languages=list(languages))
         except Exception as e:
@@ -290,15 +308,8 @@ def _fetch_raw_with_retry(api, video_id: str, languages, max_retries: int = 3):
 def fetch_youtube_transcript(url_or_id: str, languages=("en",)) -> List[Line]:
     """Fetch a YouTube video's transcript and return it as merged Lines,
     ready to pass straight into score_transcript()."""
-    try:
-        api = _build_transcript_api()
-    except ImportError:
-        raise RuntimeError(
-            "youtube-transcript-api isn't installed. Run: pip install youtube-transcript-api"
-        )
-
     video_id = extract_video_id(url_or_id)
-    raw = _fetch_raw_with_retry(api, video_id, languages)
+    raw = _fetch_raw_with_retry(video_id, languages)
     return merge_fragments(raw)
 
 
@@ -318,15 +329,8 @@ def fetch_youtube_transcript_raw(url_or_id: str, languages=("en",)) -> List[Line
     slows down. Raw fragments track actual speech pacing far more
     closely since they're small enough that estimation error within each
     one stays tiny."""
-    try:
-        api = _build_transcript_api()
-    except ImportError:
-        raise RuntimeError(
-            "youtube-transcript-api isn't installed. Run: pip install youtube-transcript-api"
-        )
-
     video_id = extract_video_id(url_or_id)
-    raw = _fetch_raw_with_retry(api, video_id, languages)
+    raw = _fetch_raw_with_retry(video_id, languages)
 
     lines: List[Line] = []
     for e in raw:
