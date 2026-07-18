@@ -260,6 +260,36 @@ input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px 
 .status { margin-top: 12px; font-size: 0.88rem; color: var(--text-dim); min-height: 1.2em; }
 .status.error { color: var(--red); }
 
+/* Animated loading indicator — indeterminate sliding bar + rotating
+   status text, dropped into .status/.cut-status containers in place of
+   plain "Analyzing..." text while a request is in flight. */
+.loading-bar {
+  position: relative;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--border-soft);
+  overflow: hidden;
+}
+.loading-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 32%;
+  border-radius: var(--r-pill);
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  animation: loading-slide 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes loading-slide {
+  0%, 100% { left: -32%; }
+  50% { left: 100%; }
+}
+.loading-message {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  transition: opacity 0.25s ease;
+}
+
 .auth-note { margin-top: 12px; font-size: 0.8rem; color: var(--text-dim); line-height: 1.5; }
 
 .placeholder-card {

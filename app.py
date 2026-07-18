@@ -23,6 +23,7 @@ import datetime
 import functools
 import subprocess
 import tempfile
+import concurrent.futures
 from typing import Optional, Dict
 
 import stripe
@@ -296,9 +297,11 @@ def cut_youtube_clip(
     max_seconds: int = 90,
     max_height: int = 480,
     lines: Optional[list] = None,
+    lines_future: Optional["concurrent.futures.Future"] = None,
     captions: bool = False,
     caption_style: str = DEFAULT_STYLE,
     vertical: bool = False,
+    fast_encode: bool = False,
 ) -> str:
     """Download just the needed section of a YouTube video with yt-dlp,
     trim it precisely with ffmpeg, and return the filename (inside
@@ -391,6 +394,22 @@ def cut_youtube_clip(
     duration = end_seconds - start_seconds
 
     if captions or vertical:
+        # If the caller handed us a future (route fetched the transcript
+        # on a background thread so it overlaps with the yt-dlp download
+        # above instead of happening after it), resolve it now — right
+        # before it's actually needed, so the two I/O-bound calls run
+        # concurrently instead of back-to-back. Kept as a distinct
+        # try/except from the ffmpeg step below so a transcript failure
+        # still gets its own clear error message.
+        if lines_future is not None:
+            try:
+                lines = lines_future.result()
+            except Exception as e:
+                shutil.rmtree(workdir, ignore_errors=True)
+                raise RuntimeError(
+                    f"Couldn't fetch captions for this video ({e}). Try cutting without captions."
+                )
+
         # Captions/crop need a video filter, which means a re-encode no
         # matter what — so trim, crop, and caption burn-in all happen in
         # ONE ffmpeg pass here, straight from the raw download. Doing the
@@ -428,12 +447,19 @@ def cut_youtube_clip(
             run_ffmpeg(["-c", "copy"])
         except subprocess.CalledProcessError:
             try:
-                # CRF 18 ("visually lossless" territory) + preset medium
-                # (better compression efficiency than fast, at the cost of
-                # some encode time — worth it since clips are short, up to
-                # 180s on the paid tier).
+                # CRF 18 stays fixed either way — it's a visual-quality
+                # target, not a speed knob, so this doesn't cost free-tier
+                # users any noticeable quality. The preset is the actual
+                # speed/compression-efficiency tradeoff: "medium" packs
+                # the same quality into a smaller file but takes longer to
+                # encode, "veryfast" trades some file size for a
+                # meaningfully quicker encode. Free tier (already capped
+                # at 720p/90s, the highest-volume first-impression path)
+                # gets veryfast so the wait is shorter; paid tier — where
+                # people are already paying for quality — keeps medium.
+                preset = "veryfast" if fast_encode else "medium"
                 run_ffmpeg(
-                    ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-c:a", "aac"]
+                    ["-c:v", "libx264", "-crf", "18", "-preset", preset, "-c:a", "aac"]
                 )
             except subprocess.CalledProcessError:
                 shutil.rmtree(workdir, ignore_errors=True)
@@ -898,17 +924,23 @@ def cut():
     except Exception:
         return jsonify({"error": "Couldn't parse start/end time."}), 400
 
-    lines = []
+    # Raw (unmerged) fragments, not the sentence-merged transcript
+    # /api/analyze uses — captions need YouTube's real per-fragment
+    # timestamps to stay in sync, merging loses that granularity.
+    #
+    # This used to block here and fetch the transcript before the video
+    # download even started — two independent network calls (transcript
+    # API, video download) run one after another for no reason. Kicking
+    # the transcript fetch off on a background thread lets it overlap
+    # with the yt-dlp download inside cut_youtube_clip below, so the
+    # captions cut path takes roughly max(fetch, download) instead of
+    # fetch + download. cut_youtube_clip resolves the future right
+    # before it actually needs the lines.
+    transcript_executor = None
+    transcript_future = None
     if want_captions:
-        try:
-            # Raw (unmerged) fragments, not the sentence-merged transcript
-            # /api/analyze uses — captions need YouTube's real per-fragment
-            # timestamps to stay in sync, merging loses that granularity.
-            lines = fetch_youtube_transcript_raw(url)
-        except Exception as e:
-            return jsonify(
-                {"error": f"Couldn't fetch captions for this video ({e}). Try cutting without captions."}
-            ), 502
+        transcript_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        transcript_future = transcript_executor.submit(fetch_youtube_transcript_raw, url)
 
     try:
         filename = cut_youtube_clip(
@@ -917,13 +949,17 @@ def cut():
             end_s,
             max_seconds=current_user.max_clip_seconds(),
             max_height=current_user.max_height(),
-            lines=lines,
+            lines_future=transcript_future,
             captions=want_captions,
             caption_style=caption_style,
             vertical=want_vertical,
+            fast_encode=not current_user.is_paid,
         )
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
+    finally:
+        if transcript_executor:
+            transcript_executor.shutdown(wait=False)
 
     current_user.record_usage("cut")
     return jsonify(

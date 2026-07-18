@@ -85,6 +85,56 @@ let projectListFetchedOnce = false;
 let pendingReferralCode = new URLSearchParams(window.location.search).get('ref') || null;
 
 // ---------------------------------------------------------------------
+// Loading indicator — animated bar + rotating status messages, used
+// anywhere a request takes a real, noticeable amount of time (analyze,
+// focus search, cutting). Replaces flat "Analyzing..." style text.
+// Messages describe real sequential steps (transcript fetch, then LLM
+// scoring; download, then encode) rather than a fabricated percentage —
+// there's no reliable progress signal from the server for any of these,
+// so an indeterminate sliding bar is the honest version of "this is
+// actively working," and the rotating text gives a sense of where the
+// time is actually going instead of one static word for the whole wait.
+// ---------------------------------------------------------------------
+const LOADING_MESSAGES = {
+  analyze: [
+    'Fetching the transcript…',
+    'Reading through the video…',
+    'Finding the best moments…',
+    'Scoring each clip…',
+  ],
+  focus: [
+    'Fetching the transcript…',
+    'Searching for matching moments…',
+  ],
+  cut: [
+    'Downloading the clip…',
+    'Encoding the video…',
+  ],
+  cutStyled: [
+    'Downloading the clip…',
+    'Cropping and styling…',
+    'Burning in captions…',
+  ],
+};
+
+function showLoadingBar(el, messages) {
+  el.innerHTML =
+    '<div class="loading-bar"><div class="loading-bar-fill"></div></div>' +
+    `<div class="loading-message">${messages[0]}</div>`;
+  const msgEl = el.querySelector('.loading-message');
+  let i = 0;
+  const timer = setInterval(() => {
+    i = (i + 1) % messages.length;
+    msgEl.style.opacity = '0';
+    setTimeout(() => {
+      msgEl.textContent = messages[i];
+      msgEl.style.opacity = '1';
+    }, 250);
+  }, 2200);
+  return () => clearInterval(timer); // caller stops it once the real result is in
+}
+
+// ---------------------------------------------------------------------
 // View switching (sidebar nav)
 // ---------------------------------------------------------------------
 const VIEW_TITLES = {
@@ -475,7 +525,7 @@ async function runFocusSearch() {
   }
 
   focusStatus.className = 'status';
-  focusStatus.textContent = 'Searching the video...';
+  const stopLoading = showLoadingBar(focusStatus, LOADING_MESSAGES.focus);
   focusResults.innerHTML = '';
   focusBtn.disabled = true;
   try {
@@ -485,6 +535,7 @@ async function runFocusSearch() {
       body: JSON.stringify({ youtube_url: url, query }),
     });
     const data = await res.json();
+    stopLoading();
     if (!res.ok) {
       focusStatus.className = 'status error';
       if (data.auth_required) {
@@ -506,6 +557,7 @@ async function runFocusSearch() {
       renderAccountUI();
     }
   } catch (e) {
+    stopLoading();
     focusStatus.className = 'status error';
     focusStatus.textContent = 'Network error while searching.';
   } finally {
@@ -523,9 +575,7 @@ focusQueryInput.addEventListener('keydown', (e) => {
 async function cutClip(youtubeUrl, start, end, statusNode, videoWrap, extras) {
   statusNode.className = 'cut-status';
   const willStyle = extras && (extras.captions || extras.vertical);
-  statusNode.textContent = willStyle
-    ? 'Cutting and styling the clip (captions/crop take a bit longer)...'
-    : 'Cutting the clip from the video (this can take a bit)...';
+  const stopLoading = showLoadingBar(statusNode, willStyle ? LOADING_MESSAGES.cutStyled : LOADING_MESSAGES.cut);
   try {
     const res = await fetch('/api/cut', {
       method: 'POST',
@@ -533,6 +583,7 @@ async function cutClip(youtubeUrl, start, end, statusNode, videoWrap, extras) {
       body: JSON.stringify({ youtube_url: youtubeUrl, start, end, ...(extras || {}) }),
     });
     const data = await res.json();
+    stopLoading();
     if (!res.ok) {
       statusNode.className = 'cut-status error';
       if (data.auth_required) {
@@ -555,6 +606,7 @@ async function cutClip(youtubeUrl, start, end, statusNode, videoWrap, extras) {
       renderAccountUI();
     }
   } catch (e) {
+    stopLoading();
     statusNode.className = 'cut-status error';
     statusNode.textContent = 'Network error while cutting.';
   }
@@ -1236,7 +1288,7 @@ async function openProjectById(id) {
 // ---------------------------------------------------------------------
 async function run(endpoint, body) {
   statusEl.className = 'status';
-  statusEl.textContent = 'Analyzing...';
+  const stopLoading = showLoadingBar(statusEl, LOADING_MESSAGES.analyze);
   resultsEl.innerHTML = '';
   analyzeBtn.disabled = true; demoBtn.disabled = true;
   try {
@@ -1246,6 +1298,7 @@ async function run(endpoint, body) {
       body: body ? JSON.stringify(body) : undefined,
     });
     const data = await res.json();
+    stopLoading();
     if (!res.ok) {
       statusEl.className = 'status error';
       if (data.auth_required) {
@@ -1279,6 +1332,7 @@ async function run(endpoint, body) {
       renderAccountUI();
     }
   } catch (e) {
+    stopLoading();
     statusEl.className = 'status error';
     statusEl.textContent = 'Network error — is the server running?';
   } finally {
