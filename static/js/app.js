@@ -1130,7 +1130,7 @@ function renderProjectList(projects) {
   if (!projects.length) {
     projectList.innerHTML = `
       <div class="placeholder-card panel">
-        <div class="big-icon">&#9636;</div>
+        <div class="big-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5a1 1 0 0 1 1-1H9l2 2.2h8.5a1 1 0 0 1 1 1V17a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z"/></svg></div>
         <h2>No projects yet</h2>
         <p>Paste a YouTube link above and hit "Find clips" — every video you analyze is saved here so you can come back to it anytime.</p>
       </div>
