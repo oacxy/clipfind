@@ -601,11 +601,22 @@ def analyze():
         clips = build_clips(scored_lines, top_n=top)
 
     current_user.record_usage()
+    clips_json = clips_to_json(clips)
+    # Timeline view needs the full video length to position clip segments
+    # proportionally along a bar. There's no dedicated metadata fetch for
+    # this (that'd mean another network round-trip against YouTube) — the
+    # transcript's last line already gives a good-enough estimate, widened
+    # to cover any clip that runs past it so no segment ever renders off
+    # the end of the bar.
+    last_line = lines[-1]
+    transcript_end = last_line.end if last_line.end is not None else last_line.timestamp
+    video_duration = max([transcript_end] + [c["end_seconds"] for c in clips_json])
     response = {
-        "clips": clips_to_json(clips),
+        "clips": clips_json,
         "scoring_method": scoring_method,
         "source": "youtube",
         "remaining_today": current_user.remaining_today(),
+        "video_duration": round(video_duration, 2),
     }
     # TEMPORARY debug aid: surfaces the real LLM failure reason directly in
     # the response so it's visible without digging through Render logs.
@@ -706,7 +717,15 @@ def demo():
     lines = load_transcript(DEMO_TRANSCRIPT_PATH)
     lines = score_transcript(lines)
     clips = build_clips(lines, top_n=5)
-    return jsonify({"clips": clips_to_json(clips), "source": "demo"})
+    clips_json = clips_to_json(clips)
+    last_line = lines[-1]
+    transcript_end = last_line.end if last_line.end is not None else last_line.timestamp
+    video_duration = max([transcript_end] + [c["end_seconds"] for c in clips_json])
+    return jsonify({
+        "clips": clips_json,
+        "source": "demo",
+        "video_duration": round(video_duration, 2),
+    })
 
 
 DISCOVER_MAX_AGE = datetime.timedelta(hours=3)

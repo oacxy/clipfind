@@ -95,12 +95,22 @@
         </div>
       </div>
 
-      <!-- Timeline view: placeholder -->
+      <!-- Timeline view -->
       <div class="view" id="view-timeline">
-        <div class="placeholder-card panel">
-          <div class="big-icon">&#9135;</div>
-          <h2>Timeline</h2>
-          <p>A scrubber across the whole video with colored markers for every detected moment — hover to preview, click to jump. In development.</p>
+        <div class="panel">
+          <div class="row" style="justify-content:space-between;align-items:center;">
+            <div style="color:var(--text-dim);">Every detected moment across the video, mapped by score.</div>
+            <div class="timeline-legend">
+              <span><i class="tier-high"></i> 80+</span>
+              <span><i class="tier-mid"></i> 60&ndash;79</span>
+              <span><i class="tier-low"></i> &lt;60</span>
+            </div>
+          </div>
+          <div class="status" id="timelineStatus"></div>
+          <div class="timeline-wrap" id="timelineWrap" style="display:none;">
+            <div class="timeline-track" id="timelineTrack"></div>
+            <div class="timeline-ruler" id="timelineRuler"></div>
+          </div>
         </div>
       </div>
 

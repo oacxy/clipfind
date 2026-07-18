@@ -211,6 +211,44 @@ input:focus { outline: none; border-color: var(--accent); }
 .clip video { margin-top: 12px; width: 100%; border-radius: 8px; display: block; }
 .clip .dl-link { font-size: 0.82rem; color: var(--green); }
 
+/* ---------- Timeline ---------- */
+.timeline-legend { display: flex; gap: 14px; font-size: 0.75rem; color: var(--text-dim); flex-shrink: 0; }
+.timeline-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+.timeline-legend i.tier-high { background: var(--green); }
+.timeline-legend i.tier-mid { background: var(--yellow); }
+.timeline-legend i.tier-low { background: var(--text-dimmer); }
+
+.timeline-wrap { margin-top: 22px; }
+.timeline-track {
+  position: relative;
+  height: 48px;
+  background: #0d0d13;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.timeline-seg {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.timeline-seg:hover { opacity: 1; transform: scaleY(1.1); }
+.timeline-seg.tier-high { background: linear-gradient(180deg, var(--green), #2bb37c); }
+.timeline-seg.tier-mid { background: linear-gradient(180deg, var(--yellow), #d9a63f); }
+.timeline-seg.tier-low { background: linear-gradient(180deg, var(--text-dimmer), #45455a); }
+.timeline-ruler { position: relative; height: 20px; margin-top: 6px; }
+.timeline-tick { position: absolute; transform: translateX(-50%); font-size: 0.7rem; color: var(--text-dimmer); white-space: nowrap; }
+
+.clip.flash { animation: flash-highlight 1.5s ease; }
+@keyframes flash-highlight {
+  0% { box-shadow: 0 0 0 2px var(--accent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
 /* ---------- Discover ---------- */
 .discover-card { background: #0d0d13; border: 1px solid var(--border); border-radius: 12px; padding: 18px; display: flex; gap: 14px; }
 .discover-card img { width: 120px; height: 68px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }

@@ -33,9 +33,15 @@ const discoverStatus = document.getElementById('discoverStatus');
 const discoverResults = document.getElementById('discoverResults');
 const refreshDiscoverBtn = document.getElementById('refreshDiscoverBtn');
 
+const timelineStatus = document.getElementById('timelineStatus');
+const timelineWrap = document.getElementById('timelineWrap');
+const timelineTrack = document.getElementById('timelineTrack');
+const timelineRuler = document.getElementById('timelineRuler');
+
 let session = { logged_in: false };
 let lastYoutubeUrl = null; // set when the results came from a real video, not the demo
 let discoverLoaded = false;
+let lastAnalyzeData = null; // { clips, video_duration, isYoutube } from the most recent /api/analyze or /api/demo — feeds the Timeline view
 
 // ---------------------------------------------------------------------
 // View switching (sidebar nav)
@@ -239,6 +245,78 @@ async function loadDiscover(forceRefresh) {
 refreshDiscoverBtn.addEventListener('click', () => loadDiscover(true));
 
 // ---------------------------------------------------------------------
+// Timeline
+// ---------------------------------------------------------------------
+function formatSeconds(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function scoreTier(score) {
+  if (score >= 80) return 'tier-high';
+  if (score >= 60) return 'tier-mid';
+  return 'tier-low';
+}
+
+function jumpToClip(index) {
+  switchView('projects');
+  const cards = resultsEl.querySelectorAll('.clip');
+  const target = cards[index];
+  if (target) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.remove('flash');
+    // force reflow so the animation restarts if the same clip is clicked twice in a row
+    void target.offsetWidth;
+    target.classList.add('flash');
+  }
+}
+
+function renderTimeline() {
+  timelineTrack.innerHTML = '';
+  timelineRuler.innerHTML = '';
+
+  if (!lastAnalyzeData || !lastAnalyzeData.clips.length) {
+    timelineWrap.style.display = 'none';
+    timelineStatus.className = 'status';
+    timelineStatus.textContent = 'Analyze a video under Projects first — Timeline maps out whatever was last analyzed.';
+    return;
+  }
+
+  const { clips, video_duration, isYoutube } = lastAnalyzeData;
+  const duration = Math.max(video_duration || 0, 1);
+
+  timelineWrap.style.display = 'block';
+  timelineStatus.className = 'status';
+  timelineStatus.textContent = `${clips.length} moments across ${formatSeconds(duration)}${isYoutube ? '' : ' (demo transcript)'} — click a segment to jump to it.`;
+
+  clips.forEach((c, i) => {
+    const seg = document.createElement('div');
+    seg.className = `timeline-seg ${scoreTier(c.score)}`;
+    const leftPct = (c.start_seconds / duration) * 100;
+    const widthPct = Math.max(((c.end_seconds - c.start_seconds) / duration) * 100, 0.6);
+    seg.style.left = `${leftPct}%`;
+    seg.style.width = `${widthPct}%`;
+    seg.title = `${c.start} – ${c.end} · score ${c.score}\n"${c.hook}"`;
+    seg.addEventListener('click', () => jumpToClip(i));
+    timelineTrack.appendChild(seg);
+  });
+
+  const tickCount = 6;
+  for (let i = 0; i <= tickCount; i++) {
+    const tick = document.createElement('span');
+    tick.className = 'timeline-tick';
+    const pct = (i / tickCount) * 100;
+    tick.style.left = `${pct}%`;
+    if (i === 0) tick.style.transform = 'translateX(0)';
+    if (i === tickCount) tick.style.transform = 'translateX(-100%)';
+    tick.textContent = formatSeconds((duration / tickCount) * i);
+    timelineRuler.appendChild(tick);
+  }
+}
+
+// ---------------------------------------------------------------------
 // Cutting clips (captions/vertical crop)
 // ---------------------------------------------------------------------
 async function cutClip(youtubeUrl, start, end, statusNode, videoWrap, extras) {
@@ -431,6 +509,8 @@ async function run(endpoint, body) {
     }
     const isYoutube = data.source === 'youtube';
     lastYoutubeUrl = isYoutube ? (body && body.youtube_url) : null;
+    lastAnalyzeData = { clips: data.clips, video_duration: data.video_duration || 0, isYoutube };
+    renderTimeline();
     let methodNote = data.scoring_method === 'llm' ? ' — AI-analyzed' : (data.scoring_method === 'heuristic' && data.source === 'youtube' ? ' — basic scoring (AI analysis unavailable right now)' : '');
     if (data.llm_debug) { methodNote += ` [debug: ${data.llm_debug}]`; }
     statusEl.textContent = `${data.clips.length} clips found${data.source === 'demo' ? ' (demo transcript)' : ''}${methodNote}`;
