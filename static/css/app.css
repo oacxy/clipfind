@@ -211,6 +211,20 @@ input:focus { outline: none; border-color: var(--accent); }
 .clip video { margin-top: 12px; width: 100%; border-radius: 8px; display: block; }
 .clip .dl-link { font-size: 0.82rem; color: var(--green); }
 
+/* ---------- Focus Mode ---------- */
+.focus-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.preset-chip {
+  padding: 7px 13px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.preset-chip:hover { border-color: var(--accent); color: var(--text); }
+
 /* ---------- Timeline ---------- */
 .timeline-legend { display: flex; gap: 14px; font-size: 0.75rem; color: var(--text-dim); flex-shrink: 0; }
 .timeline-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }

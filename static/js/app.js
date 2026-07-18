@@ -38,6 +38,13 @@ const timelineWrap = document.getElementById('timelineWrap');
 const timelineTrack = document.getElementById('timelineTrack');
 const timelineRuler = document.getElementById('timelineRuler');
 
+const focusUrlInput = document.getElementById('focusUrlInput');
+const focusQueryInput = document.getElementById('focusQueryInput');
+const focusBtn = document.getElementById('focusBtn');
+const focusStatus = document.getElementById('focusStatus');
+const focusResults = document.getElementById('focusResults');
+const focusPresets = document.getElementById('focusPresets');
+
 let session = { logged_in: false };
 let lastYoutubeUrl = null; // set when the results came from a real video, not the demo
 let discoverLoaded = false;
@@ -73,6 +80,9 @@ function switchView(view) {
   }
   if (view === 'settings') {
     renderSettings();
+  }
+  if (view === 'focusmode' && !focusUrlInput.value && lastYoutubeUrl) {
+    focusUrlInput.value = lastYoutubeUrl;
   }
 }
 
@@ -317,6 +327,73 @@ function renderTimeline() {
 }
 
 // ---------------------------------------------------------------------
+// AI Focus Mode
+// ---------------------------------------------------------------------
+focusPresets.querySelectorAll('.preset-chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    focusQueryInput.value = chip.dataset.query;
+    focusQueryInput.focus();
+  });
+});
+
+async function runFocusSearch() {
+  const url = focusUrlInput.value.trim();
+  const query = focusQueryInput.value.trim();
+  if (!url) {
+    focusStatus.className = 'status error';
+    focusStatus.textContent = 'Paste a YouTube URL first.';
+    return;
+  }
+  if (!query) {
+    focusStatus.className = 'status error';
+    focusStatus.textContent = 'Type what to search for, or pick a preset below.';
+    return;
+  }
+
+  focusStatus.className = 'status';
+  focusStatus.textContent = 'Searching the video...';
+  focusResults.innerHTML = '';
+  focusBtn.disabled = true;
+  try {
+    const res = await fetch('/api/focus', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ youtube_url: url, query }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      focusStatus.className = 'status error';
+      if (data.auth_required) {
+        focusStatus.textContent = 'Sign in first.';
+      } else if (data.limit_reached) {
+        focusStatus.textContent = data.error;
+        switchView('settings');
+      } else {
+        focusStatus.textContent = data.error || 'Could not run that search.';
+      }
+      return;
+    }
+    focusStatus.textContent = data.clips.length
+      ? `${data.clips.length} moment${data.clips.length === 1 ? '' : 's'} found matching "${data.query}".`
+      : `No moments found matching "${data.query}" — try rephrasing, or the video just doesn't have that.`;
+    renderClips(data.clips, true, focusResults, url);
+    if (typeof data.remaining_today !== 'undefined') {
+      session.remaining_today = data.remaining_today;
+      renderAccountUI();
+    }
+  } catch (e) {
+    focusStatus.className = 'status error';
+    focusStatus.textContent = 'Network error while searching.';
+  } finally {
+    focusBtn.disabled = false;
+  }
+}
+focusBtn.addEventListener('click', runFocusSearch);
+focusQueryInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runFocusSearch();
+});
+
+// ---------------------------------------------------------------------
 // Cutting clips (captions/vertical crop)
 // ---------------------------------------------------------------------
 async function cutClip(youtubeUrl, start, end, statusNode, videoWrap, extras) {
@@ -402,8 +479,8 @@ function renderAnalystBreakdown(subScores, suggestions) {
   `;
 }
 
-function renderClips(clips, isYoutube) {
-  resultsEl.innerHTML = '';
+function renderClips(clips, isYoutube, container = resultsEl, youtubeUrl = lastYoutubeUrl) {
+  container.innerHTML = '';
   clips.forEach((c) => {
     const div = document.createElement('div');
     div.className = 'clip';
@@ -418,7 +495,7 @@ function renderClips(clips, isYoutube) {
       <div class="cut-status"></div>
       <div class="video-wrap"></div>
     `;
-    resultsEl.appendChild(div);
+    container.appendChild(div);
 
     const actions = div.querySelector('.actions');
     const cutStatus = div.querySelector('.cut-status');
@@ -470,7 +547,7 @@ function renderClips(clips, isYoutube) {
         const extras = isPaid
           ? { captions: captionsCheck.checked, caption_style: styleSelect.value, vertical: verticalCheck.checked }
           : {};
-        cutClip(lastYoutubeUrl, c.start_seconds, c.end_seconds, cutStatus, videoWrap, extras)
+        cutClip(youtubeUrl, c.start_seconds, c.end_seconds, cutStatus, videoWrap, extras)
           .finally(() => { cutBtn.disabled = false; });
       });
       actions.appendChild(cutBtn);

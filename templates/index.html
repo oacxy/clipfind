@@ -86,12 +86,25 @@
         </div>
       </div>
 
-      <!-- Focus Mode view: placeholder -->
+      <!-- Focus Mode view -->
       <div class="view" id="view-focusmode">
-        <div class="placeholder-card panel">
-          <div class="big-icon">&#9673;</div>
-          <h2>AI Focus Mode</h2>
-          <p>Tell the AI exactly what kind of moment to find within a video — "every time he laughs," "find every argument," or a preset category. In development.</p>
+        <div class="panel">
+          <div class="row">
+            <input type="text" id="focusUrlInput" placeholder="https://www.youtube.com/watch?v=..." />
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <input type="text" id="focusQueryInput" placeholder='What to find — "every time he laughs", "arguments", "key insights"...' />
+            <button id="focusBtn">Search</button>
+          </div>
+          <div class="focus-presets" id="focusPresets">
+            <button type="button" class="preset-chip" data-query="Funny moments and jokes">Funny moments</button>
+            <button type="button" class="preset-chip" data-query="Emotional or heartfelt moments">Emotional moments</button>
+            <button type="button" class="preset-chip" data-query="Arguments, disagreements, or conflict">Arguments</button>
+            <button type="button" class="preset-chip" data-query="Key insights, advice, or takeaways">Key insights</button>
+            <button type="button" class="preset-chip" data-query="Surprising or shocking moments">Surprising moments</button>
+          </div>
+          <div class="status" id="focusStatus"></div>
+          <div class="results" id="focusResults"></div>
         </div>
       </div>
 

@@ -36,6 +36,7 @@ from flask_login import (
 )
 
 from llm_scorer import score_with_llm
+from focus_mode import find_moments_with_llm
 from discover import build_discover_feed
 from digest import send_digest_emails, generate_unsubscribe_token, verify_unsubscribe_token
 from captions import build_ass_subtitle, chunk_captions_for_clip, STYLE_PRESETS, DEFAULT_STYLE
@@ -624,6 +625,74 @@ def analyze():
     # to expose internal error details/tracebacks to end users long-term.
     if llm_error:
         response["llm_debug"] = llm_error
+    return jsonify(response)
+
+
+@app.route("/api/focus", methods=["POST"])
+@json_login_required
+def focus():
+    """AI Focus Mode: search one video's transcript for every moment
+    matching a natural-language query, instead of /api/analyze's job of
+    picking the best clips overall. Counts against the same daily
+    analyze limit as /api/analyze — it's the same underlying LLM cost,
+    just aimed at a specific question instead of a general pass."""
+    data = request.get_json(silent=True) or {}
+    url = (data.get("youtube_url") or "").strip()
+    query = (data.get("query") or "").strip()
+
+    if not url:
+        return jsonify({"error": "Paste a YouTube URL first."}), 400
+    if not query:
+        return jsonify({"error": "Tell it what to search for, or pick a preset."}), 400
+
+    if not current_user.can_analyze():
+        return jsonify(
+            {
+                "error": f"You've used all {FREE_DAILY_LIMIT} free searches today. Upgrade for unlimited.",
+                "limit_reached": True,
+            }
+        ), 402
+
+    try:
+        lines = fetch_youtube_transcript(url)
+    except Exception as e:
+        msg = str(e)
+        if "Subtitles are disabled" in msg or "NoTranscriptFound" in msg:
+            friendly = "This video doesn't have captions available, so there's no transcript to search."
+        elif "RequestBlocked" in msg or "IpBlocked" in msg or "blocking requests from your IP" in msg:
+            friendly = (
+                "YouTube is blocking this server's IP (common on cloud hosts like Render). "
+                "This needs a residential proxy configured — see WEBSHARE_PROXY_USERNAME/"
+                "WEBSHARE_PROXY_PASSWORD in the deploy notes. Not fixable by retrying."
+            )
+        elif "ProxyError" in msg or "Max retries" in msg:
+            friendly = "Couldn't reach YouTube from this server right now. Try again in a moment."
+        else:
+            friendly = f"Couldn't fetch that video's transcript ({msg})."
+        return jsonify({"error": friendly}), 502
+
+    if not lines:
+        return jsonify({"error": "Got an empty transcript for that video."}), 502
+
+    # No heuristic fallback here (unlike /api/analyze) — there's no
+    # keyword-matching equivalent to "find every moment matching an
+    # arbitrary natural-language query," so an LLM failure is a real
+    # error, not something to silently degrade past.
+    try:
+        moments = find_moments_with_llm(lines, query, max_results=12)
+    except Exception as e:
+        import traceback
+        print(f"[FOCUS_MODE_FAILED] {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        return jsonify({"error": "Couldn't run that search right now — try again in a moment."}), 502
+
+    current_user.record_usage()
+    response = {
+        "clips": clips_to_json(moments),
+        "query": query,
+        "source": "youtube",
+        "remaining_today": current_user.remaining_today(),
+    }
     return jsonify(response)
 
 
