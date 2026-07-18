@@ -686,6 +686,13 @@ def analyze():
         lines = fetch_youtube_transcript(url)
     except Exception as e:
         msg = str(e)
+        # This branch had no server-side logging at all before — a
+        # consistently-failing proxy (expired Webshare package, exhausted
+        # bandwidth quota, bad credentials) was invisible in Render's
+        # logs, only ever showing the generic friendly message to users.
+        # Logging here is what lets a "why does this keep failing" report
+        # actually get diagnosed instead of guessed at.
+        print(f"[TRANSCRIPT_FETCH_FAILED] analyze url={url!r} {type(e).__name__}: {e}", flush=True)
         if "Subtitles are disabled" in msg or "NoTranscriptFound" in msg:
             friendly = "This video doesn't have captions available, so there's no transcript to score."
         elif "RequestBlocked" in msg or "IpBlocked" in msg or "blocking requests from your IP" in msg:
@@ -695,7 +702,11 @@ def analyze():
                 "WEBSHARE_PROXY_PASSWORD in the deploy notes. Not fixable by retrying."
             )
         elif "ProxyError" in msg or "Max retries" in msg:
-            friendly = "Couldn't reach YouTube from this server right now. Try again in a moment."
+            friendly = (
+                "Couldn't reach YouTube through the proxy after retrying. This usually means the "
+                "Webshare proxy account is out of bandwidth, expired, or misconfigured — check "
+                "the Webshare dashboard. Check the server logs for the real error."
+            )
         else:
             friendly = f"Couldn't fetch that video's transcript ({msg})."
         return jsonify({"error": friendly}), 502
@@ -801,6 +812,7 @@ def focus():
         lines = fetch_youtube_transcript(url)
     except Exception as e:
         msg = str(e)
+        print(f"[TRANSCRIPT_FETCH_FAILED] focus url={url!r} {type(e).__name__}: {e}", flush=True)
         if "Subtitles are disabled" in msg or "NoTranscriptFound" in msg:
             friendly = "This video doesn't have captions available, so there's no transcript to search."
         elif "RequestBlocked" in msg or "IpBlocked" in msg or "blocking requests from your IP" in msg:
@@ -810,7 +822,11 @@ def focus():
                 "WEBSHARE_PROXY_PASSWORD in the deploy notes. Not fixable by retrying."
             )
         elif "ProxyError" in msg or "Max retries" in msg:
-            friendly = "Couldn't reach YouTube from this server right now. Try again in a moment."
+            friendly = (
+                "Couldn't reach YouTube through the proxy after retrying. This usually means the "
+                "Webshare proxy account is out of bandwidth, expired, or misconfigured — check "
+                "the Webshare dashboard. Check the server logs for the real error."
+            )
         else:
             friendly = f"Couldn't fetch that video's transcript ({msg})."
         return jsonify({"error": friendly}), 502

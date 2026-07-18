@@ -163,7 +163,16 @@ def _best_clip_for_video(video_id: str) -> Optional[dict]:
     separate judgment logic to keep in sync."""
     try:
         lines = fetch_youtube_transcript(video_id)
-    except Exception:
+    except Exception as e:
+        # Deliberately quiet at the per-candidate level (Discover tries
+        # ~16 candidates per refresh and a handful of misses — disabled
+        # captions, private videos — is normal) *except* when the failure
+        # looks like the proxy itself is down, since that would silently
+        # tank every candidate in the refresh and is worth a signal in
+        # the logs rather than just "0 picks" with no explanation.
+        msg = str(e)
+        if "ProxyError" in msg or "Max retries" in msg:
+            print(f"[DISCOVER] proxy fetch failed for {video_id}: {type(e).__name__}: {e}", flush=True)
         return None
     if not lines:
         return None

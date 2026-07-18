@@ -27,6 +27,7 @@ YouTube auto-import requires: pip install youtube-transcript-api
 
 import re
 import sys
+import time
 import argparse
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -253,6 +254,39 @@ def _build_transcript_api():
     return YouTubeTranscriptApi()
 
 
+def _is_transient_proxy_error(msg: str) -> bool:
+    """True for errors that look like 'this specific request/exit-IP
+    failed' rather than 'this will never work' — a rotating residential
+    proxy pool (Webshare) occasionally hands out a slow or momentarily
+    blocked exit IP, and simply trying again usually gets a different one.
+    Deliberately does NOT match RequestBlocked/IpBlocked (that means no
+    proxy is configured at all, or YouTube blocked the proxy IP itself —
+    retrying won't help) or NoTranscriptFound/Subtitles disabled (a real,
+    permanent fact about the video, not a network hiccup)."""
+    return any(
+        s in msg
+        for s in ("ProxyError", "Max retries", "Connection reset", "Connection aborted", "timed out", "Timeout")
+    )
+
+
+def _fetch_raw_with_retry(api, video_id: str, languages, max_retries: int = 3):
+    """Retries api.fetch() on transient-looking proxy/network failures,
+    with a short backoff between attempts. Real, permanent failures
+    (disabled captions, no proxy configured at all) raise immediately on
+    the first try — no point burning three attempts on something that
+    will never succeed."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return api.fetch(video_id, languages=list(languages))
+        except Exception as e:
+            last_error = e
+            if not _is_transient_proxy_error(str(e)) or attempt == max_retries - 1:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+    raise last_error  # unreachable, but keeps type checkers happy
+
+
 def fetch_youtube_transcript(url_or_id: str, languages=("en",)) -> List[Line]:
     """Fetch a YouTube video's transcript and return it as merged Lines,
     ready to pass straight into score_transcript()."""
@@ -264,7 +298,7 @@ def fetch_youtube_transcript(url_or_id: str, languages=("en",)) -> List[Line]:
         )
 
     video_id = extract_video_id(url_or_id)
-    raw = api.fetch(video_id, languages=list(languages))
+    raw = _fetch_raw_with_retry(api, video_id, languages)
     return merge_fragments(raw)
 
 
@@ -292,7 +326,7 @@ def fetch_youtube_transcript_raw(url_or_id: str, languages=("en",)) -> List[Line
         )
 
     video_id = extract_video_id(url_or_id)
-    raw = api.fetch(video_id, languages=list(languages))
+    raw = _fetch_raw_with_retry(api, video_id, languages)
 
     lines: List[Line] = []
     for e in raw:
