@@ -473,8 +473,8 @@ def create_checkout_session():
             line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
             customer_email=current_user.email,
             client_reference_id=str(current_user.id),
-            success_url=f"{base_url}/?checkout=success",
-            cancel_url=f"{base_url}/?checkout=cancelled",
+            success_url=f"{base_url}/app?checkout=success",
+            cancel_url=f"{base_url}/app?checkout=cancelled",
         )
     except Exception as e:
         return jsonify({"error": f"Couldn't start checkout: {e}"}), 502
@@ -816,6 +816,11 @@ def unsubscribe():
 
 
 @app.route("/")
+def landing():
+    return render_template("landing.html")
+
+
+@app.route("/app")
 def index():
     return render_template("index.html")
 

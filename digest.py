@@ -105,7 +105,7 @@ def render_digest_html(feed: List[dict], app_url: str, unsubscribe_url: str) -> 
         {''.join(cards)}
         <tr>
           <td style="text-align:center;padding:12px 0 24px 0;">
-            <a href="{app_url}" style="display:inline-block;background:linear-gradient(135deg,#7c5cff,#ff5c9a);color:white;font-weight:600;font-size:14px;text-decoration:none;padding:14px 28px;border-radius:8px;">
+            <a href="{app_url}/app?tab=discover" style="display:inline-block;background:linear-gradient(135deg,#7c5cff,#ff5c9a);color:white;font-weight:600;font-size:14px;text-decoration:none;padding:14px 28px;border-radius:8px;">
               Open ClipFind &rarr;
             </a>
           </td>

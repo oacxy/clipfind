@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClipFind — AI clip finder for YouTube</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/landing.css') }}">
+</head>
+<body>
+
+<div class="container">
+  <nav class="nav">
+    <div class="nav-logo">Clip<span>Find</span></div>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#how-it-works">How it works</a>
+      <a href="#pricing">Pricing</a>
+    </div>
+    <div class="nav-cta">
+      <a href="/app" class="btn btn-secondary btn-sm">Log in</a>
+      <a href="/app" class="btn btn-primary btn-sm">Sign Up</a>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="hero-badge">AI clip finding that actually understands content</div>
+    <h1>Turn long videos into<br><span class="gradient">viral clips in seconds.</span></h1>
+    <p>Paste a YouTube link. AI finds the moments worth clipping, explains why each one works, and cuts the video for you — captions and vertical crop included.</p>
+    <div class="hero-ctas">
+      <a href="/app" class="btn btn-primary">Try ClipFind Free</a>
+      <a href="#how-it-works" class="btn btn-secondary">See how it works</a>
+    </div>
+  </section>
+
+  <section class="section" id="features">
+    <div class="section-title">Everything you need to find the clip</div>
+    <div class="section-sub">Not just a video cutter — an AI that reads the whole transcript and tells you what's worth using.</div>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="f-icon">🎯</div>
+        <h3>AI Clip Detection</h3>
+        <p>Claude reads the full transcript and finds the moments most likely to hook a viewer — not just keyword matching.</p>
+      </div>
+      <div class="feature-card">
+        <div class="f-icon">🧠</div>
+        <h3>Written Reasoning</h3>
+        <p>Every clip comes with a real explanation of why it works, not just a score. Understand the pick, don't just trust it.</p>
+      </div>
+      <div class="feature-card">
+        <div class="f-icon">🔥</div>
+        <h3>Discover Feed</h3>
+        <p>See videos outperforming right now — ranked by real view velocity, not vibes — so you always know what to clip next.</p>
+      </div>
+      <div class="feature-card">
+        <div class="f-icon">💬</div>
+        <h3>Burned-In Captions</h3>
+        <p>Bold Impact, Karaoke Highlight, or Boxed — styled captions burned directly into the export, synced to real speech timing.</p>
+      </div>
+      <div class="feature-card">
+        <div class="f-icon">📱</div>
+        <h3>Vertical Auto-Crop</h3>
+        <p>One click turns a landscape video into a 9:16 export ready for TikTok, Shorts, or Reels.</p>
+      </div>
+      <div class="feature-card">
+        <div class="f-icon">📬</div>
+        <h3>Daily Digest</h3>
+        <p>The best picks land in your inbox automatically, so you never have to remember to go check.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="how-it-works">
+    <div class="section-title">From video to viral clip in 3 steps</div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Paste a YouTube link</h3>
+        <p>Any video with captions available.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>AI finds the clips</h3>
+        <p>Scored and explained, in seconds.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>Cut & download</h3>
+        <p>Add captions, crop vertical, export.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-title">Built for every creator</div>
+    <div class="creator-row">
+      <span>📺 Streamers</span>
+      <span>🎬 YouTubers</span>
+      <span>🎙️ Podcasters</span>
+      <span>✂️ Editors</span>
+      <span>🏢 Agencies</span>
+    </div>
+  </section>
+
+  <section class="section" id="pricing">
+    <div class="section-title">Simple pricing</div>
+    <div class="section-sub">Start free. Upgrade when you're ready for unlimited.</div>
+    <div class="pricing-grid">
+      <div class="price-card">
+        <div class="p-name">Free</div>
+        <div class="p-amount">$0<span>/month</span></div>
+        <ul>
+          <li>3 clips analyzed per day</li>
+          <li>3 downloads per day</li>
+          <li>90-second max clips</li>
+          <li>720p resolution</li>
+        </ul>
+        <a href="/app" class="btn btn-secondary">Get started</a>
+      </div>
+      <div class="price-card highlight">
+        <div class="p-name">Unlimited</div>
+        <div class="p-amount">$29<span>/month</span></div>
+        <ul>
+          <li>Unlimited clips & downloads</li>
+          <li>180-second max clips</li>
+          <li>1080p resolution</li>
+          <li>Styled captions + vertical crop</li>
+        </ul>
+        <a href="/app" class="btn btn-primary">Upgrade</a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    &copy; ClipFind
+  </footer>
+</div>
+
+</body>
+</html>
