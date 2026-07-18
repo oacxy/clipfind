@@ -138,5 +138,17 @@
   </footer>
 </div>
 
+<script>
+  // Carry a referral code from the landing page through to the app's
+  // signup form — someone visiting clipfind.com/?ref=CODE should still
+  // get attributed to that referral after clicking through to /app.
+  (function () {
+    var ref = new URLSearchParams(window.location.search).get('ref');
+    if (!ref) return;
+    document.querySelectorAll('a[href="/app"]').forEach(function (a) {
+      a.href = '/app?ref=' + encodeURIComponent(ref);
+    });
+  })();
+</script>
 </body>
 </html>

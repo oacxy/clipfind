@@ -26,6 +26,16 @@ PAID_MAX_CLIP_SECONDS = 180
 FREE_MAX_HEIGHT = 720
 PAID_MAX_HEIGHT = 1080
 
+# Referral loop: entirely self-contained in the app's own usage-limit
+# system rather than issuing Stripe coupons — no billing API calls, no
+# risk of a coupon bug touching real money. A referral only pays out once
+# the referred user actually analyzes a video (see _maybe_reward_referral
+# in app.py), not just on signup, as a cheap guard against reward-farming
+# with throwaway accounts. Capped so it can't be chained into effectively
+# unlimited free usage.
+REFERRAL_BONUS_PER_SIGNUP = 3
+MAX_REFERRAL_BONUS_DAILY = 15
+
 
 class User(UserMixin, db.Model):
     __tablename__ = "users"
@@ -45,6 +55,18 @@ class User(UserMixin, db.Model):
     # unsubscribe, rather than requiring an explicit opt-in step.
     email_opt_in = db.Column(db.Boolean, default=True, nullable=False)
 
+    # Referral loop
+    referral_code = db.Column(db.String(16), unique=True, nullable=True, index=True)
+    referred_by_user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    # Flips to True the first time this user (as a referee) triggers their
+    # referrer's reward — after that, further activity by this user never
+    # pays out again, so a single referred account can't be farmed for
+    # repeated bonuses.
+    referral_rewarded = db.Column(db.Boolean, default=False, nullable=False)
+    # Permanent bonus this user has *earned* by referring others — separate
+    # from referred_by_user_id, which tracks who referred *this* user.
+    bonus_daily_clips = db.Column(db.Integer, default=0, nullable=False)
+
     def set_password(self, raw_password: str) -> None:
         self.password_hash = generate_password_hash(raw_password)
 
@@ -56,15 +78,18 @@ class User(UserMixin, db.Model):
         row = DailyUsage.query.filter_by(user_id=self.id, date=today, kind=kind).first()
         return row.count if row else 0
 
+    def effective_daily_limit(self) -> int:
+        return FREE_DAILY_LIMIT + (self.bonus_daily_clips or 0)
+
     def remaining_today(self, kind: str = "analyze"):
         if self.is_paid:
             return None  # unlimited
-        return max(0, FREE_DAILY_LIMIT - self.usage_today(kind))
+        return max(0, self.effective_daily_limit() - self.usage_today(kind))
 
     def can_use(self, kind: str = "analyze") -> bool:
         if self.is_paid:
             return True
-        return self.usage_today(kind) < FREE_DAILY_LIMIT
+        return self.usage_today(kind) < self.effective_daily_limit()
 
     # kept for compatibility with existing call sites
     def can_analyze(self) -> bool:

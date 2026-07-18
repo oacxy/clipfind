@@ -37,6 +37,10 @@ const backToProjectsBtn = document.getElementById('backToProjectsBtn');
 const analystSummary = document.getElementById('analystSummary');
 const videoSummary = document.getElementById('videoSummary');
 
+const referralLinkInput = document.getElementById('referralLinkInput');
+const copyReferralBtn = document.getElementById('copyReferralBtn');
+const referralStatus = document.getElementById('referralStatus');
+
 const discoverStatus = document.getElementById('discoverStatus');
 const discoverResults = document.getElementById('discoverResults');
 const refreshDiscoverBtn = document.getElementById('refreshDiscoverBtn');
@@ -75,6 +79,10 @@ let collectionNamesCache = []; // flat list of existing collection names, for th
 let currentProject = null; // { id, youtube_url, clips, video_duration, scoring_method, isYoutube } — the project workspace currently open
 let projectListCache = [];
 let projectListFetchedOnce = false;
+// Captured once at page load — someone arriving via clipfind.com/?ref=CODE
+// (or /app?ref=CODE directly) should still get attributed even if they
+// poke around before actually signing up.
+let pendingReferralCode = new URLSearchParams(window.location.search).get('ref') || null;
 
 // ---------------------------------------------------------------------
 // View switching (sidebar nav)
@@ -154,9 +162,11 @@ function renderAccountUI() {
     planUsage.textContent = 'Unlimited clips';
     planBarFill.style.width = '100%';
   } else {
-    const limit = session.free_daily_limit || 3;
+    const bonus = session.bonus_daily_clips || 0;
+    const limit = (session.free_daily_limit || 3) + bonus;
     const used = Math.max(0, limit - (session.remaining_today ?? limit));
-    planUsage.textContent = `${session.remaining_today ?? '—'} analyses + ${session.remaining_cuts_today ?? '—'} downloads left today`;
+    const bonusNote = bonus > 0 ? ` (includes +${bonus} referral bonus)` : '';
+    planUsage.textContent = `${session.remaining_today ?? '—'} analyses + ${session.remaining_cuts_today ?? '—'} downloads left today${bonusNote}`;
     planBarFill.style.width = `${Math.min(100, (used / limit) * 100)}%`;
   }
   sidebarUpgradeBtn.style.display = isPaid ? 'none' : 'block';
@@ -169,7 +179,30 @@ function renderSettings() {
   const isPaid = session.is_paid;
   settingsInfo.innerHTML = `Signed in as <b>${session.email}</b><br>Plan: <b>${isPaid ? 'Unlimited' : 'Free (3 clips/day)'}</b>`;
   settingsUpgradeBtn.style.display = isPaid ? 'none' : 'inline-block';
+
+  if (session.referral_code) {
+    referralLinkInput.value = `${window.location.origin}/?ref=${session.referral_code}`;
+    const count = session.referral_count || 0;
+    const bonus = session.bonus_daily_clips || 0;
+    const maxBonus = session.max_referral_bonus || 15;
+    referralStatus.className = 'status';
+    if (!count) {
+      referralStatus.textContent = 'No referrals yet — share your link to start earning bonus clips.';
+    } else if (bonus >= maxBonus) {
+      referralStatus.textContent = `${count} friend${count === 1 ? '' : 's'} joined through your link — you're at the max bonus of +${maxBonus} clips/day.`;
+    } else {
+      referralStatus.textContent = `${count} friend${count === 1 ? '' : 's'} joined through your link — +${bonus} bonus clip${bonus === 1 ? '' : 's'}/day.`;
+    }
+  }
 }
+
+copyReferralBtn.addEventListener('click', () => {
+  if (!referralLinkInput.value) return;
+  navigator.clipboard.writeText(referralLinkInput.value).then(() => {
+    copyReferralBtn.textContent = 'Copied ✓';
+    setTimeout(() => { copyReferralBtn.textContent = 'Copy link'; }, 1500);
+  });
+});
 
 async function refreshSession() {
   const res = await fetch('/api/me');
@@ -187,7 +220,10 @@ authBtn.addEventListener('click', async () => {
     const res = await fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      // referral_code is only used server-side when this creates a brand
+      // new account — harmless to always send it, an existing-user login
+      // just ignores it.
+      body: JSON.stringify({ email, password, referral_code: pendingReferralCode }),
     });
     const data = await res.json();
     if (!res.ok) {

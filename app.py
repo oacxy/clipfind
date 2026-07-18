@@ -51,7 +51,17 @@ from clipfind import (
     fmt_timestamp,
     parse_timestamp,
 )
-from models import db, User, DiscoverFeed, SavedClip, Project, FREE_DAILY_LIMIT, PAID_MAX_CLIP_SECONDS
+from models import (
+    db,
+    User,
+    DiscoverFeed,
+    SavedClip,
+    Project,
+    FREE_DAILY_LIMIT,
+    PAID_MAX_CLIP_SECONDS,
+    REFERRAL_BONUS_PER_SIGNUP,
+    MAX_REFERRAL_BONUS_DAILY,
+)
 
 app = Flask(__name__)
 
@@ -91,9 +101,63 @@ def _ensure_email_opt_in_column():
         print("[MIGRATION] added users.email_opt_in", flush=True)
 
 
+def _generate_referral_code(used_codes=None) -> str:
+    """8-char code, checked against both the DB and any codes already
+    handed out earlier in the same call (needed for the backfill loop
+    below, which assigns many codes in one transaction before committing —
+    a DB uniqueness check alone wouldn't see its own uncommitted siblings)."""
+    used_codes = used_codes if used_codes is not None else set()
+    while True:
+        code = uuid.uuid4().hex[:8]
+        if code in used_codes:
+            continue
+        if not User.query.filter_by(referral_code=code).first():
+            return code
+
+
+def _ensure_referral_columns():
+    """Same story as _ensure_email_opt_in_column: the live users table
+    needs actual ALTER TABLEs for these new columns, db.create_all() won't
+    touch an existing table. Also backfills referral_code for every
+    account that existed before this migration ran, so referrals work for
+    old and new users alike, not just signups after this ships."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(db.engine)
+    existing_cols = {c["name"] for c in inspector.get_columns("users")}
+    statements = []
+    if "referral_code" not in existing_cols:
+        statements.append("ALTER TABLE users ADD COLUMN referral_code VARCHAR(16)")
+    if "referred_by_user_id" not in existing_cols:
+        statements.append("ALTER TABLE users ADD COLUMN referred_by_user_id INTEGER")
+    if "referral_rewarded" not in existing_cols:
+        statements.append("ALTER TABLE users ADD COLUMN referral_rewarded BOOLEAN NOT NULL DEFAULT FALSE")
+    if "bonus_daily_clips" not in existing_cols:
+        statements.append("ALTER TABLE users ADD COLUMN bonus_daily_clips INTEGER NOT NULL DEFAULT 0")
+    if statements:
+        with db.engine.connect() as conn:
+            for stmt in statements:
+                conn.execute(text(stmt))
+            conn.commit()
+        print(f"[MIGRATION] added {len(statements)} referral column(s) to users", flush=True)
+
+    users_missing_code = User.query.filter(
+        (User.referral_code == None) | (User.referral_code == "")  # noqa: E711
+    ).all()
+    if users_missing_code:
+        used_codes = set()
+        for u in users_missing_code:
+            code = _generate_referral_code(used_codes)
+            used_codes.add(code)
+            u.referral_code = code
+        db.session.commit()
+        print(f"[MIGRATION] backfilled referral_code for {len(users_missing_code)} existing user(s)", flush=True)
+
+
 with app.app_context():
     db.create_all()
     _ensure_email_opt_in_column()
+    _ensure_referral_columns()
 
 # --- Auth ---------------------------------------------------------------
 login_manager = LoginManager()
@@ -441,6 +505,10 @@ def auth():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
+    # Only meaningful on signup (ignored for an existing-user login) — the
+    # frontend reads ?ref=CODE off the URL and passes it through here
+    # unconditionally, since there's one shared endpoint for both.
+    ref_code = (data.get("referral_code") or "").strip()
 
     if not email or "@" not in email:
         return jsonify({"error": "Enter a valid email."}), 400
@@ -454,6 +522,11 @@ def auth():
     else:
         user = User(email=email)
         user.set_password(password)
+        user.referral_code = _generate_referral_code()
+        if ref_code:
+            referrer = User.query.filter_by(referral_code=ref_code).first()
+            if referrer and referrer.id != user.id:
+                user.referred_by_user_id = referrer.id
         db.session.add(user)
         db.session.commit()
 
@@ -475,6 +548,27 @@ def me():
     return jsonify(_user_status(current_user))
 
 
+def _maybe_reward_referral(user):
+    """Credits the referring user with bonus daily clips the first time a
+    referred signup actually analyzes a video — not just on signup, which
+    would be trivial to farm with throwaway accounts. Fires at most once
+    per referred user, guarded by referral_rewarded, regardless of how
+    many times they analyze after that."""
+    if not user.referred_by_user_id or user.referral_rewarded:
+        return
+    referrer = db.session.get(User, user.referred_by_user_id)
+    if not referrer:
+        user.referral_rewarded = True  # referrer account is gone — stop checking
+        db.session.commit()
+        return
+    referrer.bonus_daily_clips = min(
+        (referrer.bonus_daily_clips or 0) + REFERRAL_BONUS_PER_SIGNUP,
+        MAX_REFERRAL_BONUS_DAILY,
+    )
+    user.referral_rewarded = True
+    db.session.commit()
+
+
 def _user_status(user):
     return {
         "logged_in": True,
@@ -484,6 +578,12 @@ def _user_status(user):
         "remaining_cuts_today": user.remaining_today("cut"),
         "free_daily_limit": FREE_DAILY_LIMIT,
         "max_clip_seconds": user.max_clip_seconds(),
+        "referral_code": user.referral_code,
+        "bonus_daily_clips": user.bonus_daily_clips,
+        "referral_count": User.query.filter_by(
+            referred_by_user_id=user.id, referral_rewarded=True
+        ).count(),
+        "max_referral_bonus": MAX_REFERRAL_BONUS_DAILY,
     }
 
 
@@ -627,6 +727,7 @@ def analyze():
         clips = build_clips(scored_lines, top_n=top)
 
     current_user.record_usage()
+    _maybe_reward_referral(current_user)
     clips_json = clips_to_json(clips)
     # Timeline view needs the full video length to position clip segments
     # proportionally along a bar. There's no dedicated metadata fetch for
