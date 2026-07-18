@@ -92,6 +92,14 @@ class Clip:
     score: float
     hook: str
     reasoning: str = ""  # populated by the LLM scorer; empty for the heuristic path
+    # Analyst breakdown — also LLM-only. sub_scores keys: hook, virality,
+    # entertainment, retention, emotional_impact, pacing, originality
+    # (each 0-100). suggestions is a short list of concrete, clip-specific
+    # improvement tips ("start 1.5s earlier"). Both empty for the
+    # heuristic fallback path — the frontend only shows the breakdown
+    # panel when sub_scores is non-empty.
+    sub_scores: dict = field(default_factory=dict)
+    suggestions: List[str] = field(default_factory=list)
 
 
 def parse_timestamp(ts: str) -> float:

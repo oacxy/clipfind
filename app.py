@@ -153,6 +153,8 @@ def clips_to_json(clips):
                 "caption": c.hook.strip().rstrip("."),
                 "preview": preview,
                 "reasoning": c.reasoning,
+                "sub_scores": c.sub_scores,
+                "suggestions": c.suggestions,
             }
         )
     return out

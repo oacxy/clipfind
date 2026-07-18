@@ -287,6 +287,43 @@ const CAPTION_STYLES = [
   { value: 'boxed', label: 'Boxed' },
 ];
 
+const SUB_SCORE_LABELS = {
+  hook: 'Hook',
+  virality: 'Virality',
+  entertainment: 'Entertainment',
+  retention: 'Retention',
+  emotional_impact: 'Emotional Impact',
+  pacing: 'Pacing',
+  originality: 'Originality',
+};
+
+function renderAnalystBreakdown(subScores, suggestions) {
+  const hasSubScores = subScores && Object.keys(subScores).length > 0;
+  const hasSuggestions = suggestions && suggestions.length > 0;
+  if (!hasSubScores && !hasSuggestions) return '';
+
+  const bars = hasSubScores
+    ? Object.entries(subScores).map(([key, val]) => `
+        <div class="score-row">
+          <span class="score-label">${SUB_SCORE_LABELS[key] || key}</span>
+          <div class="score-bar"><div class="score-bar-fill" style="width:${val}%;"></div></div>
+          <span class="score-val">${val}</span>
+        </div>`).join('')
+    : '';
+
+  const suggestionItems = hasSuggestions
+    ? `<ul class="suggestion-list">${suggestions.map((s) => `<li>${s}</li>`).join('')}</ul>`
+    : '';
+
+  return `
+    <details class="analyst-breakdown">
+      <summary>View full analysis</summary>
+      ${bars ? `<div class="score-rows">${bars}</div>` : ''}
+      ${suggestionItems}
+    </details>
+  `;
+}
+
 function renderClips(clips, isYoutube) {
   resultsEl.innerHTML = '';
   clips.forEach((c) => {
@@ -297,6 +334,7 @@ function renderClips(clips, isYoutube) {
       <div class="hook">"${c.hook}"</div>
       ${c.reasoning ? `<div class="reasoning">🧠 ${c.reasoning}</div>` : ''}
       <div class="preview">${c.preview}</div>
+      ${renderAnalystBreakdown(c.sub_scores, c.suggestions)}
       <div class="style-controls"></div>
       <div class="actions"></div>
       <div class="cut-status"></div>

@@ -27,7 +27,7 @@ from clipfind import Line, Clip, parse_timestamp, fmt_timestamp
 
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
-PROMPT_TEMPLATE = """You are an experienced short-form video editor and content strategist. Below is a timestamped transcript of a video. Your job is to find the {top_n} best moments to cut into standalone short-form clips (for TikTok, Reels, or YouTube Shorts).
+PROMPT_TEMPLATE = """You are an experienced short-form video editor and content strategist acting as an AI Analyst. Below is a timestamped transcript of a video. Your job is to find the {top_n} best moments to cut into standalone short-form clips (for TikTok, Reels, or YouTube Shorts), and give each one a full analyst-style breakdown.
 
 Look for: strong hooks, surprising or contrarian statements, emotional moments, concrete stories with a clear payoff, useful stats or insights, and humor. Each clip should be able to stand alone and make sense without the rest of the video, and should generally run 15-90 seconds.
 
@@ -38,7 +38,16 @@ Respond with ONLY a JSON array, no other text before or after, no markdown code 
 - "end": a timestamp string copied exactly from the transcript
 - "hook": a short, punchy version of the opening line, under 15 words
 - "reasoning": 1-2 sentences explaining specifically why this moment works as a clip, written like an experienced editor giving feedback
-- "score": an integer 0-100 rating how likely this clip is to perform well
+- "score": an integer 0-100, the overall rating of how likely this clip is to perform well
+- "sub_scores": an object with these seven integer 0-100 ratings, each judged specifically against this clip's own content:
+  - "hook": how strong the first few seconds are at creating curiosity, surprise, or energy
+  - "virality": overall likelihood this specific clip performs well if posted
+  - "entertainment": how fun/engaging it is to watch
+  - "retention": how likely a viewer is to watch to the end without dropping off
+  - "emotional_impact": how much genuine emotional weight or authenticity it has
+  - "pacing": how well the rhythm works here — not rushed, not dragging
+  - "originality": how fresh/unique the moment feels versus generic content
+- "suggestions": an array of 2-4 short, concrete, actionable strings for improving THIS specific clip (e.g. "Start 1.5s earlier for more impact", "End 2s sooner to tighten the loop", "This moment would work well vertical"). Be specific to this clip's actual content and timing, not generic advice that could apply to anything.
 
 Transcript:
 {transcript}
@@ -87,11 +96,19 @@ def score_with_llm(
 
     response = client.messages.create(
         model=model or DEFAULT_MODEL,
-        max_tokens=2000,
+        # Bumped from 2000: the sub_scores object + suggestions array add
+        # real size per clip on top of the original fields, and this
+        # needs headroom for top_n=6+ clips without truncating mid-JSON.
+        max_tokens=3500,
         messages=[{"role": "user", "content": prompt}],
     )
     raw_text = "".join(block.text for block in response.content if hasattr(block, "text"))
     items = _extract_json_array(raw_text)
+
+    SUB_SCORE_KEYS = (
+        "hook", "virality", "entertainment", "retention",
+        "emotional_impact", "pacing", "originality",
+    )
 
     clips: List[Clip] = []
     for item in items:
@@ -106,6 +123,25 @@ def score_with_llm(
         # Ground the preview text in the *actual* transcript, not the model's words.
         clip_lines = [l for l in lines if start_s <= l.timestamp <= end_s]
 
+        # Sub-scores/suggestions are a bonus on top of the core fields —
+        # parse them defensively so a malformed/missing breakdown on one
+        # clip degrades to "no breakdown for this clip" rather than
+        # dropping the clip (or the whole batch) entirely.
+        sub_scores = {}
+        raw_sub_scores = item.get("sub_scores")
+        if isinstance(raw_sub_scores, dict):
+            for key in SUB_SCORE_KEYS:
+                val = raw_sub_scores.get(key)
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    sub_scores[key] = max(0, min(100, int(val)))
+
+        suggestions = []
+        raw_suggestions = item.get("suggestions")
+        if isinstance(raw_suggestions, list):
+            for s in raw_suggestions[:5]:
+                if isinstance(s, str) and s.strip():
+                    suggestions.append(s.strip()[:150])
+
         clips.append(
             Clip(
                 start=start_s,
@@ -114,6 +150,8 @@ def score_with_llm(
                 score=float(item.get("score", 0)),
                 hook=str(item.get("hook", "")).strip()[:300],
                 reasoning=str(item.get("reasoning", "")).strip()[:500],
+                sub_scores=sub_scores,
+                suggestions=suggestions,
             )
         )
 

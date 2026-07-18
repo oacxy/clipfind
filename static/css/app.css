@@ -178,6 +178,27 @@ input:focus { outline: none; border-color: var(--accent); }
 .clip .hook { font-weight: 600; margin-bottom: 6px; }
 .clip .reasoning { color: var(--accent); font-size: 0.85rem; margin-bottom: 8px; font-style: italic; }
 .clip .preview { color: var(--text-dim); font-size: 0.85rem; }
+
+.analyst-breakdown { margin-top: 12px; }
+.analyst-breakdown summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 600;
+  list-style: none;
+}
+.analyst-breakdown summary::-webkit-details-marker { display: none; }
+.analyst-breakdown summary::before { content: "▸ "; }
+.analyst-breakdown[open] summary::before { content: "▾ "; }
+.score-rows { margin-top: 12px; display: flex; flex-direction: column; gap: 7px; }
+.score-row { display: flex; align-items: center; gap: 10px; font-size: 0.78rem; }
+.score-row .score-label { width: 110px; flex-shrink: 0; color: var(--text-dim); }
+.score-row .score-bar { flex: 1; height: 5px; border-radius: 3px; background: #26262f; overflow: hidden; }
+.score-row .score-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--green)); }
+.score-row .score-val { width: 26px; text-align: right; color: var(--text); font-weight: 600; }
+.suggestion-list { margin-top: 12px; padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.suggestion-list li { font-size: 0.8rem; color: var(--text-dim); padding-left: 18px; position: relative; }
+.suggestion-list li::before { content: "✓"; position: absolute; left: 0; color: var(--green); font-weight: 700; }
 .clip .actions { margin-top: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .clip .actions button { padding: 8px 14px; font-size: 0.82rem; }
 .clip .cut-status { font-size: 0.8rem; color: var(--text-dim); }
