@@ -33,7 +33,6 @@
       <button class="nav-item active" data-view="dashboard"><span class="icon">&#9679;</span> Dashboard</button>
       <button class="nav-item" data-view="projects"><span class="icon">&#9636;</span> Projects</button>
       <button class="nav-item" data-view="focusmode"><span class="icon">&#9673;</span> AI Focus Mode</button>
-      <button class="nav-item" data-view="timeline"><span class="icon">&#9135;</span> Timeline</button>
       <button class="nav-item" data-view="discover"><span class="icon">&#9650;</span> Discover</button>
       <button class="nav-item" data-view="collections"><span class="icon">&#9783;</span> Collections</button>
       <button class="nav-item" data-view="exports"><span class="icon">&#8595;</span> Exports</button>
@@ -73,17 +72,73 @@
         </div>
       </div>
 
-      <!-- Projects view: the core paste-a-link -> analyze -> results flow -->
+      <!-- Projects view: list of past analyses + a tabbed workspace per project -->
       <div class="view" id="view-projects">
-        <div class="panel">
-          <div class="row">
-            <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
-            <button id="analyzeBtn">Find clips</button>
-            <button id="demoBtn" class="secondary">Try demo</button>
+
+        <!-- Project list sub-view -->
+        <div id="projectsListView">
+          <div class="panel">
+            <div class="row">
+              <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
+              <button id="analyzeBtn">Find clips</button>
+              <button id="demoBtn" class="secondary">Try demo</button>
+            </div>
+            <div class="status" id="status"></div>
           </div>
-          <div class="status" id="status"></div>
-          <div class="results" id="results"></div>
+          <div class="project-list" id="projectList"></div>
         </div>
+
+        <!-- Project workspace sub-view: Clips / Timeline / Analyst / Summary tabs for one analyzed video -->
+        <div id="projectWorkspace" style="display:none;">
+          <div class="workspace-header">
+            <button class="secondary" id="backToProjectsBtn">&larr; All Projects</button>
+            <div class="workspace-title" id="workspaceTitle"></div>
+          </div>
+
+          <div class="workspace-tabs">
+            <button class="workspace-tab active" data-wtab="clips">Clips</button>
+            <button class="workspace-tab" data-wtab="timeline">Timeline</button>
+            <button class="workspace-tab" data-wtab="analyst">Analyst</button>
+            <button class="workspace-tab" data-wtab="summary">Summary</button>
+          </div>
+
+          <div class="workspace-panel active" id="wtab-clips">
+            <div class="panel">
+              <div class="results" id="results"></div>
+            </div>
+          </div>
+
+          <div class="workspace-panel" id="wtab-timeline">
+            <div class="panel">
+              <div class="row" style="justify-content:space-between;align-items:center;">
+                <div style="color:var(--text-dim);">Every detected moment across this video, mapped by score.</div>
+                <div class="timeline-legend">
+                  <span><i class="tier-high"></i> 80+</span>
+                  <span><i class="tier-mid"></i> 60&ndash;79</span>
+                  <span><i class="tier-low"></i> &lt;60</span>
+                </div>
+              </div>
+              <div class="status" id="timelineStatus"></div>
+              <div class="timeline-wrap" id="timelineWrap" style="display:none;">
+                <div class="timeline-track" id="timelineTrack"></div>
+                <div class="timeline-ruler" id="timelineRuler"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="workspace-panel" id="wtab-analyst">
+            <div class="panel">
+              <div id="analystSummary"></div>
+            </div>
+          </div>
+
+          <div class="workspace-panel" id="wtab-summary">
+            <div class="panel">
+              <div id="videoSummary"></div>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <!-- Focus Mode view -->
@@ -105,25 +160,6 @@
           </div>
           <div class="status" id="focusStatus"></div>
           <div class="results" id="focusResults"></div>
-        </div>
-      </div>
-
-      <!-- Timeline view -->
-      <div class="view" id="view-timeline">
-        <div class="panel">
-          <div class="row" style="justify-content:space-between;align-items:center;">
-            <div style="color:var(--text-dim);">Every detected moment across the video, mapped by score.</div>
-            <div class="timeline-legend">
-              <span><i class="tier-high"></i> 80+</span>
-              <span><i class="tier-mid"></i> 60&ndash;79</span>
-              <span><i class="tier-low"></i> &lt;60</span>
-            </div>
-          </div>
-          <div class="status" id="timelineStatus"></div>
-          <div class="timeline-wrap" id="timelineWrap" style="display:none;">
-            <div class="timeline-track" id="timelineTrack"></div>
-            <div class="timeline-ruler" id="timelineRuler"></div>
-          </div>
         </div>
       </div>
 

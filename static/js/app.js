@@ -29,6 +29,14 @@ const analyzeBtn = document.getElementById('analyzeBtn');
 const demoBtn = document.getElementById('demoBtn');
 const urlInput = document.getElementById('urlInput');
 
+const projectsListView = document.getElementById('projectsListView');
+const projectWorkspace = document.getElementById('projectWorkspace');
+const projectList = document.getElementById('projectList');
+const workspaceTitle = document.getElementById('workspaceTitle');
+const backToProjectsBtn = document.getElementById('backToProjectsBtn');
+const analystSummary = document.getElementById('analystSummary');
+const videoSummary = document.getElementById('videoSummary');
+
 const discoverStatus = document.getElementById('discoverStatus');
 const discoverResults = document.getElementById('discoverResults');
 const refreshDiscoverBtn = document.getElementById('refreshDiscoverBtn');
@@ -60,10 +68,13 @@ let discoverLoaded = false;
 let lastDiscoverFeed = []; // full unfiltered feed from the last fetch — category chips filter this client-side, no refetch
 let lastDiscoverComputedAt = null;
 let activeDiscoverCategory = 'all';
-let lastAnalyzeData = null; // { clips, video_duration, isYoutube } from the most recent /api/analyze or /api/demo — feeds the Timeline view
+let lastAnalyzeData = null; // { clips, video_duration, isYoutube } from the most recent /api/analyze or /api/demo — feeds the Timeline tab
 let collectionsData = null; // { "Collection Name": [savedClip, ...], ... } from the last /api/collections fetch
 let collectionsFetchedOnce = false;
 let collectionNamesCache = []; // flat list of existing collection names, for the save-form autocomplete
+let currentProject = null; // { id, youtube_url, clips, video_duration, scoring_method, isYoutube } — the project workspace currently open
+let projectListCache = [];
+let projectListFetchedOnce = false;
 
 // ---------------------------------------------------------------------
 // View switching (sidebar nav)
@@ -72,7 +83,6 @@ const VIEW_TITLES = {
   dashboard: 'Dashboard',
   projects: 'Projects',
   focusmode: 'AI Focus Mode',
-  timeline: 'Timeline',
   discover: 'Discover',
   collections: 'Collections',
   exports: 'Exports',
@@ -105,6 +115,13 @@ function switchView(view) {
   if (view === 'exports') {
     loadExportsView(false);
   }
+  if (view === 'projects') {
+    // Sidebar "Projects" always lands on the project list, even if a
+    // specific project's workspace was open before navigating away —
+    // reopening the same project takes one click from the list.
+    showProjectsList();
+    loadProjectList(false);
+  }
 }
 
 document.querySelectorAll('.nav-item').forEach((btn) => {
@@ -113,6 +130,7 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
 
 document.getElementById('newProjectBtn').addEventListener('click', () => {
   switchView('projects');
+  showProjectsList();
   urlInput.focus();
 });
 
@@ -966,6 +984,218 @@ function renderExportsView(data) {
 refreshExportsBtn.addEventListener('click', () => loadExportsView(true));
 
 // ---------------------------------------------------------------------
+// Project workspace (Clips / Timeline / Analyst / Summary tabs)
+// ---------------------------------------------------------------------
+function showProjectsList() {
+  projectWorkspace.style.display = 'none';
+  projectsListView.style.display = 'block';
+}
+
+function switchWorkspaceTab(tab) {
+  document.querySelectorAll('.workspace-tab').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.wtab === tab);
+  });
+  document.querySelectorAll('.workspace-panel').forEach((el) => {
+    el.classList.toggle('active', el.id === `wtab-${tab}`);
+  });
+}
+document.querySelectorAll('.workspace-tab').forEach((btn) => {
+  btn.addEventListener('click', () => switchWorkspaceTab(btn.dataset.wtab));
+});
+backToProjectsBtn.addEventListener('click', showProjectsList);
+
+function openProjectWorkspace(meta) {
+  currentProject = meta;
+  // Timeline tab and the clip cards' cut/save actions both read off these
+  // globals — same pattern the standalone Timeline view used before it
+  // moved in here, just re-populated per project instead of per analyze.
+  lastAnalyzeData = { clips: meta.clips, video_duration: meta.video_duration, isYoutube: meta.isYoutube };
+  lastYoutubeUrl = meta.isYoutube ? meta.youtube_url : null;
+
+  projectsListView.style.display = 'none';
+  projectWorkspace.style.display = 'block';
+  workspaceTitle.textContent = meta.isYoutube ? meta.youtube_url : 'Demo transcript';
+  switchWorkspaceTab('clips');
+
+  renderClips(meta.clips, meta.isYoutube, resultsEl, meta.youtube_url);
+  renderTimeline();
+  renderAnalystSummary(meta);
+  renderVideoSummary(meta);
+}
+
+function renderAnalystSummary(meta) {
+  const clips = meta.clips || [];
+  if (!clips.length) {
+    analystSummary.innerHTML = '<div class="status">No clips to analyze yet.</div>';
+    return;
+  }
+
+  const avgScore = clips.reduce((sum, c) => sum + (c.score || 0), 0) / clips.length;
+  const topClipIndex = clips.reduce((bestIdx, c, i) => (c.score > clips[bestIdx].score ? i : bestIdx), 0);
+  const topClip = clips[topClipIndex];
+
+  const clipsWithSubScores = clips.filter((c) => c.sub_scores && Object.keys(c.sub_scores).length > 0);
+  let subScoreHtml;
+  if (clipsWithSubScores.length) {
+    const averages = {};
+    Object.keys(SUB_SCORE_LABELS).forEach((key) => {
+      const vals = clipsWithSubScores.map((c) => c.sub_scores[key]).filter((v) => typeof v === 'number');
+      if (vals.length) averages[key] = Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
+    });
+    subScoreHtml = `<div class="score-rows">${Object.entries(averages).map(([key, val]) => `
+      <div class="score-row">
+        <span class="score-label">${SUB_SCORE_LABELS[key] || key}</span>
+        <div class="score-bar"><div class="score-bar-fill" style="width:${val}%;"></div></div>
+        <span class="score-val">${val}</span>
+      </div>`).join('')}</div>`;
+  } else {
+    subScoreHtml = '<div class="status">AI Analyst breakdown wasn\'t available for this video (fell back to basic scoring), so there\'s no sub-score data to average.</div>';
+  }
+
+  analystSummary.innerHTML = `
+    <div class="analyst-top-clip">
+      <div class="analyst-top-clip-label">Top clip</div>
+      <div class="hook">"${topClip.hook}"</div>
+      <div class="meta"><span>${topClip.start} – ${topClip.end}</span><span class="score">score ${topClip.score}</span></div>
+    </div>
+    <h3 class="analyst-avg-heading">Average across ${clips.length} clip${clips.length === 1 ? '' : 's'} — overall score ${avgScore.toFixed(0)}</h3>
+    ${subScoreHtml}
+  `;
+
+  const topClipEl = analystSummary.querySelector('.analyst-top-clip');
+  if (topClipEl) {
+    topClipEl.addEventListener('click', () => {
+      switchWorkspaceTab('clips');
+      const target = resultsEl.querySelectorAll('.clip')[topClipIndex];
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.classList.remove('flash');
+        void target.offsetWidth;
+        target.classList.add('flash');
+      }
+    });
+  }
+}
+
+function renderVideoSummary(meta) {
+  const clips = meta.clips || [];
+  const duration = meta.video_duration || 0;
+  if (!clips.length || !duration) {
+    videoSummary.innerHTML = '<div class="status">No summary available yet.</div>';
+    return;
+  }
+
+  const totalClipSeconds = clips.reduce((sum, c) => sum + Math.max(0, (c.end_seconds || 0) - (c.start_seconds || 0)), 0);
+  const coveragePct = Math.min(100, Math.round((totalClipSeconds / duration) * 100));
+  const avgScore = clips.reduce((sum, c) => sum + (c.score || 0), 0) / clips.length;
+
+  let verdict;
+  if (avgScore >= 80) verdict = 'Highly clippable — strong material throughout.';
+  else if (avgScore >= 60) verdict = 'Solid clip potential — a handful of strong moments.';
+  else verdict = 'Limited clip potential — only a few usable moments found.';
+
+  videoSummary.innerHTML = `
+    <div class="summary-stat-grid">
+      <div class="summary-stat"><div class="summary-stat-val">${clips.length}</div><div class="summary-stat-label">Clips found</div></div>
+      <div class="summary-stat"><div class="summary-stat-val">${formatSeconds(duration)}</div><div class="summary-stat-label">Video length</div></div>
+      <div class="summary-stat"><div class="summary-stat-val">${coveragePct}%</div><div class="summary-stat-label">Video covered by clips</div></div>
+      <div class="summary-stat"><div class="summary-stat-val">${avgScore.toFixed(0)}</div><div class="summary-stat-label">Average clip score</div></div>
+    </div>
+    <div class="summary-verdict"><b>Verdict:</b> ${verdict} <span class="summary-verdict-note">(based on the ${meta.scoring_method === 'llm' ? 'AI Analyst' : 'basic'} scores above)</span></div>
+  `;
+}
+
+async function loadProjectList(force) {
+  if (projectListFetchedOnce && !force) {
+    renderProjectList(projectListCache);
+    return;
+  }
+  projectList.innerHTML = '<div class="status">Loading your projects...</div>';
+  try {
+    const res = await fetch('/api/projects');
+    const data = await res.json();
+    if (!res.ok) {
+      projectList.innerHTML = `<div class="status error">${data.error || 'Could not load your projects.'}</div>`;
+      return;
+    }
+    projectListCache = data.projects || [];
+    projectListFetchedOnce = true;
+    renderProjectList(projectListCache);
+  } catch (e) {
+    projectList.innerHTML = '<div class="status error">Network error loading your projects.</div>';
+  }
+}
+
+function renderProjectList(projects) {
+  if (!projects.length) {
+    projectList.innerHTML = `
+      <div class="placeholder-card panel">
+        <div class="big-icon">&#9636;</div>
+        <h2>No projects yet</h2>
+        <p>Paste a YouTube link above and hit "Find clips" — every video you analyze is saved here so you can come back to it anytime.</p>
+      </div>
+    `;
+    return;
+  }
+
+  projectList.innerHTML = '';
+  projects.forEach((p) => {
+    const row = document.createElement('div');
+    row.className = 'project-row';
+    const date = new Date(p.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    row.innerHTML = `
+      <div class="project-row-main">
+        <div class="project-row-url">${p.youtube_url}</div>
+        <div class="project-row-meta">${p.clip_count} clip${p.clip_count === 1 ? '' : 's'} · top score ${p.top_score} · ${p.scoring_method === 'llm' ? 'AI-analyzed' : 'basic scoring'} · ${date}</div>
+      </div>
+      <button type="button" class="secondary project-delete-btn">Delete</button>
+    `;
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.project-delete-btn')) return;
+      openProjectById(p.id);
+    });
+    row.querySelector('.project-delete-btn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!window.confirm('Delete this project? This only removes it from ClipFind — nothing happens to the YouTube video itself.')) return;
+      try {
+        const res = await fetch(`/api/projects/${p.id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json();
+          alert(data.error || 'Could not delete that project.');
+          return;
+        }
+        projectListFetchedOnce = false;
+        loadProjectList(true);
+      } catch (err) {
+        alert('Network error deleting that project.');
+      }
+    });
+    projectList.appendChild(row);
+  });
+}
+
+async function openProjectById(id) {
+  try {
+    const res = await fetch(`/api/projects/${id}`);
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || 'Could not open that project.');
+      return;
+    }
+    openProjectWorkspace({
+      id: data.id,
+      youtube_url: data.youtube_url,
+      clips: data.clips,
+      video_duration: data.video_duration || 0,
+      scoring_method: data.scoring_method,
+      isYoutube: true,
+    });
+  } catch (e) {
+    alert('Network error opening that project.');
+  }
+}
+
+// ---------------------------------------------------------------------
 // Analyze / demo
 // ---------------------------------------------------------------------
 async function run(endpoint, body) {
@@ -993,13 +1223,21 @@ async function run(endpoint, body) {
       return;
     }
     const isYoutube = data.source === 'youtube';
-    lastYoutubeUrl = isYoutube ? (body && body.youtube_url) : null;
-    lastAnalyzeData = { clips: data.clips, video_duration: data.video_duration || 0, isYoutube };
-    renderTimeline();
+    const youtubeUrlForThisRun = isYoutube ? (body && body.youtube_url) : null;
     let methodNote = data.scoring_method === 'llm' ? ' — AI-analyzed' : (data.scoring_method === 'heuristic' && data.source === 'youtube' ? ' — basic scoring (AI analysis unavailable right now)' : '');
     if (data.llm_debug) { methodNote += ` [debug: ${data.llm_debug}]`; }
     statusEl.textContent = `${data.clips.length} clips found${data.source === 'demo' ? ' (demo transcript)' : ''}${methodNote}`;
-    renderClips(data.clips, isYoutube);
+    openProjectWorkspace({
+      id: data.project_id || null,
+      youtube_url: youtubeUrlForThisRun,
+      clips: data.clips,
+      video_duration: data.video_duration || 0,
+      scoring_method: data.scoring_method,
+      isYoutube,
+    });
+    if (data.project_id) {
+      projectListFetchedOnce = false; // new project saved server-side — next list visit should pick it up
+    }
     if (typeof data.remaining_today !== 'undefined') {
       session.remaining_today = data.remaining_today;
       renderAccountUI();

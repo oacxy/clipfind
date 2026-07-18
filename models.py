@@ -129,6 +129,32 @@ class SavedClip(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
 
 
+class Project(db.Model):
+    """A saved analysis run — created automatically whenever a signed-in
+    user successfully analyzes a real YouTube video (not the demo). This
+    is what turns the Projects tab into an actual workspace you can come
+    back to (Clips/Timeline/Analyst/Summary), instead of results
+    vanishing the moment you analyze a different video.
+
+    clips_json mirrors DiscoverFeed's pattern: the LLM-scored (or
+    heuristic-scored) clip list is real money/time to produce, so it's
+    stored as-is and reused on reopen rather than re-run from scratch.
+    Re-analyzing the same URL just creates a new Project row rather than
+    updating an existing one — simplest thing that works, and it means
+    nothing is ever silently overwritten.
+    """
+
+    __tablename__ = "projects"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    youtube_url = db.Column(db.String(500), nullable=False)
+    clips_json = db.Column(db.Text, nullable=False)  # JSON-encoded list, same shape as clips_to_json()
+    video_duration = db.Column(db.Float, default=0)
+    scoring_method = db.Column(db.String(20), default="heuristic")
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
 class DiscoverFeed(db.Model):
     """Caches the Discover tab's results so we hit the YouTube Data API
     and the clip scorer (LLM cost!) once per refresh, not once per

@@ -51,7 +51,7 @@ from clipfind import (
     fmt_timestamp,
     parse_timestamp,
 )
-from models import db, User, DiscoverFeed, SavedClip, FREE_DAILY_LIMIT, PAID_MAX_CLIP_SECONDS
+from models import db, User, DiscoverFeed, SavedClip, Project, FREE_DAILY_LIMIT, PAID_MAX_CLIP_SECONDS
 
 app = Flask(__name__)
 
@@ -637,12 +637,30 @@ def analyze():
     last_line = lines[-1]
     transcript_end = last_line.end if last_line.end is not None else last_line.timestamp
     video_duration = max([transcript_end] + [c["end_seconds"] for c in clips_json])
+    video_duration = round(video_duration, 2)
+
+    # Persist this run as a Project so the Projects tab is a real
+    # workspace you can come back to, not results that vanish the moment
+    # you analyze something else. Re-analyzing the same URL just creates
+    # another row — no upsert complexity, and nothing gets silently
+    # overwritten.
+    project = Project(
+        user_id=current_user.id,
+        youtube_url=url,
+        clips_json=json.dumps(clips_json),
+        video_duration=video_duration,
+        scoring_method=scoring_method,
+    )
+    db.session.add(project)
+    db.session.commit()
+
     response = {
         "clips": clips_json,
         "scoring_method": scoring_method,
         "source": "youtube",
         "remaining_today": current_user.remaining_today(),
-        "video_duration": round(video_duration, 2),
+        "video_duration": video_duration,
+        "project_id": project.id,
     }
     # TEMPORARY debug aid: surfaces the real LLM failure reason directly in
     # the response so it's visible without digging through Render logs.
@@ -873,6 +891,70 @@ def discover():
         return jsonify({"error": f"Couldn't build the discover feed yet ({e})."}), 502
 
     return jsonify({"feed": feed, "computed_at": row.computed_at.isoformat() if row else None})
+
+
+def project_summary_json(p: Project) -> dict:
+    """Lightweight shape for the Projects list — doesn't include the full
+    clips array (could be large across many projects), just enough to
+    render a row and decide whether to open it."""
+    try:
+        clips = json.loads(p.clips_json)
+    except (ValueError, TypeError):
+        clips = []
+    top_score = max((c.get("score", 0) for c in clips), default=0)
+    return {
+        "id": p.id,
+        "youtube_url": p.youtube_url,
+        "clip_count": len(clips),
+        "top_score": top_score,
+        "scoring_method": p.scoring_method,
+        "created_at": p.created_at.isoformat(),
+    }
+
+
+@app.route("/api/projects", methods=["GET"])
+@json_login_required
+def list_projects():
+    projects = (
+        Project.query.filter_by(user_id=current_user.id)
+        .order_by(Project.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return jsonify({"projects": [project_summary_json(p) for p in projects]})
+
+
+@app.route("/api/projects/<int:project_id>", methods=["GET"])
+@json_login_required
+def get_project(project_id):
+    p = Project.query.filter_by(id=project_id, user_id=current_user.id).first()
+    if not p:
+        return jsonify({"error": "That project wasn't found."}), 404
+    try:
+        clips = json.loads(p.clips_json)
+    except (ValueError, TypeError):
+        clips = []
+    return jsonify(
+        {
+            "id": p.id,
+            "youtube_url": p.youtube_url,
+            "clips": clips,
+            "video_duration": p.video_duration,
+            "scoring_method": p.scoring_method,
+            "created_at": p.created_at.isoformat(),
+        }
+    )
+
+
+@app.route("/api/projects/<int:project_id>", methods=["DELETE"])
+@json_login_required
+def delete_project(project_id):
+    p = Project.query.filter_by(id=project_id, user_id=current_user.id).first()
+    if not p:
+        return jsonify({"error": "That project wasn't found."}), 404
+    db.session.delete(p)
+    db.session.commit()
+    return jsonify({"deleted": True})
 
 
 @app.route("/api/collections", methods=["GET"])
