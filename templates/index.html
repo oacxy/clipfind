@@ -140,21 +140,27 @@
         </div>
       </div>
 
-      <!-- Collections view: placeholder -->
+      <!-- Collections view -->
       <div class="view" id="view-collections">
-        <div class="placeholder-card panel">
-          <div class="big-icon">&#9783;</div>
-          <h2>Collections</h2>
-          <p>Clips automatically grouped — "Top 10 Funniest Moments," "Top 8 Rage Moments" — so a long video turns into a searchable library. In development.</p>
+        <div class="panel">
+          <div class="row" style="justify-content:space-between;">
+            <div style="color:var(--text-dim);">Clips you've saved from Projects and Focus Mode, grouped by collection.</div>
+            <button class="secondary" id="refreshCollectionsBtn">Refresh</button>
+          </div>
+          <div class="status" id="collectionsStatus"></div>
+          <div id="collectionsList"></div>
         </div>
       </div>
 
-      <!-- Exports view: placeholder -->
+      <!-- Exports view -->
       <div class="view" id="view-exports">
-        <div class="placeholder-card panel">
-          <div class="big-icon">&#8595;</div>
-          <h2>Exports</h2>
-          <p>Export presets optimized for TikTok, YouTube Shorts, and Instagram Reels, plus auto-generated titles, hashtags, and descriptions. In development.</p>
+        <div class="panel">
+          <div class="row" style="justify-content:space-between;">
+            <div style="color:var(--text-dim);">Generate ready-to-post titles, hashtags, and descriptions for your saved clips.</div>
+            <button class="secondary" id="refreshExportsBtn">Refresh</button>
+          </div>
+          <div class="status" id="exportsStatus"></div>
+          <div class="results" id="exportsList"></div>
         </div>
       </div>
 
@@ -196,6 +202,9 @@
     </div>
   </div>
 </div>
+
+<!-- Autocomplete suggestions for the "Save to collection" name field, shared across every clip card -->
+<datalist id="collectionNamesList"></datalist>
 
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

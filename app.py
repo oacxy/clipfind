@@ -23,7 +23,7 @@ import datetime
 import functools
 import subprocess
 import tempfile
-from typing import Optional
+from typing import Optional, Dict
 
 import stripe
 from flask import Flask, request, jsonify, render_template, send_from_directory
@@ -37,6 +37,7 @@ from flask_login import (
 
 from llm_scorer import score_with_llm
 from focus_mode import find_moments_with_llm
+from export_copy import generate_export_copy
 from discover import build_discover_feed
 from digest import send_digest_emails, generate_unsubscribe_token, verify_unsubscribe_token
 from captions import build_ass_subtitle, chunk_captions_for_clip, STYLE_PRESETS, DEFAULT_STYLE
@@ -50,7 +51,7 @@ from clipfind import (
     fmt_timestamp,
     parse_timestamp,
 )
-from models import db, User, DiscoverFeed, FREE_DAILY_LIMIT, PAID_MAX_CLIP_SECONDS
+from models import db, User, DiscoverFeed, SavedClip, FREE_DAILY_LIMIT, PAID_MAX_CLIP_SECONDS
 
 app = Flask(__name__)
 
@@ -159,6 +160,30 @@ def clips_to_json(clips):
             }
         )
     return out
+
+
+def saved_clip_to_json(c: SavedClip) -> dict:
+    hashtags = []
+    if c.export_hashtags:
+        try:
+            hashtags = json.loads(c.export_hashtags)
+        except (ValueError, TypeError):
+            hashtags = []
+    return {
+        "id": c.id,
+        "collection_name": c.collection_name,
+        "youtube_url": c.youtube_url,
+        "start_seconds": c.start_seconds,
+        "end_seconds": c.end_seconds,
+        "start": fmt_timestamp(max(c.start_seconds, 0)),
+        "end": fmt_timestamp(c.end_seconds),
+        "hook": c.hook,
+        "reasoning": c.reasoning,
+        "score": c.score,
+        "export_title": c.export_title,
+        "export_hashtags": hashtags,
+        "export_description": c.export_description,
+    }
 
 
 def get_proxy_url():
@@ -848,6 +873,99 @@ def discover():
         return jsonify({"error": f"Couldn't build the discover feed yet ({e})."}), 502
 
     return jsonify({"feed": feed, "computed_at": row.computed_at.isoformat() if row else None})
+
+
+@app.route("/api/collections", methods=["GET"])
+@json_login_required
+def list_collections():
+    """Returns every clip the current user has saved, grouped by
+    collection name — {"Funny Moments": [clip, ...], "Rage Bait": [...]}.
+    Grouping happens here rather than making the frontend do it since the
+    Collections view and the Exports view both need this same data shaped
+    slightly differently, and it's cheap to just hand back the grouping."""
+    clips = (
+        SavedClip.query.filter_by(user_id=current_user.id)
+        .order_by(SavedClip.created_at.desc())
+        .all()
+    )
+    grouped: Dict[str, list] = {}
+    for c in clips:
+        grouped.setdefault(c.collection_name, []).append(saved_clip_to_json(c))
+    return jsonify({"collections": grouped})
+
+
+@app.route("/api/collections/save", methods=["POST"])
+@json_login_required
+def save_clip():
+    data = request.get_json(silent=True) or {}
+    collection_name = (data.get("collection_name") or "").strip()[:120] or "Saved Clips"
+    youtube_url = (data.get("youtube_url") or "").strip()
+    start_seconds = data.get("start_seconds")
+    end_seconds = data.get("end_seconds")
+
+    if not youtube_url or start_seconds is None or end_seconds is None:
+        return jsonify({"error": "Missing clip data — can't save this."}), 400
+
+    try:
+        start_seconds = float(start_seconds)
+        end_seconds = float(end_seconds)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid clip timestamps."}), 400
+
+    clip = SavedClip(
+        user_id=current_user.id,
+        collection_name=collection_name,
+        youtube_url=youtube_url,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        hook=str(data.get("hook") or "").strip()[:300],
+        reasoning=str(data.get("reasoning") or "").strip()[:500],
+        score=float(data.get("score") or 0),
+    )
+    db.session.add(clip)
+    db.session.commit()
+    return jsonify({"saved": True, "clip": saved_clip_to_json(clip)})
+
+
+@app.route("/api/collections/clip/<int:clip_id>", methods=["DELETE"])
+@json_login_required
+def delete_saved_clip(clip_id):
+    clip = SavedClip.query.filter_by(id=clip_id, user_id=current_user.id).first()
+    if not clip:
+        return jsonify({"error": "That saved clip wasn't found."}), 404
+    db.session.delete(clip)
+    db.session.commit()
+    return jsonify({"deleted": True})
+
+
+@app.route("/api/collections/clip/<int:clip_id>/export-copy", methods=["POST"])
+@json_login_required
+def generate_clip_export_copy(clip_id):
+    """Generates (and persists) a title/hashtags/description for one
+    saved clip, for a given platform. Runs on-demand per clip rather than
+    at save time — most saved clips are never actually exported, so
+    there's no reason to spend an LLM call on every single save."""
+    clip = SavedClip.query.filter_by(id=clip_id, user_id=current_user.id).first()
+    if not clip:
+        return jsonify({"error": "That saved clip wasn't found."}), 404
+
+    data = request.get_json(silent=True) or {}
+    platform = (data.get("platform") or "tiktok").strip().lower()
+
+    try:
+        copy = generate_export_copy(clip.hook, clip.reasoning, platform=platform)
+    except Exception as e:
+        import traceback
+        print(f"[EXPORT_COPY_FAILED] {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        return jsonify({"error": "Couldn't generate export copy right now — try again in a moment."}), 502
+
+    clip.export_title = copy.get("title", "")
+    clip.export_hashtags = json.dumps(copy.get("hashtags", []))
+    clip.export_description = copy.get("description", "")
+    db.session.commit()
+
+    return jsonify({"clip": saved_clip_to_json(clip)})
 
 
 @app.route("/api/cron/send-digest", methods=["GET", "POST"])

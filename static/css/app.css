@@ -210,6 +210,34 @@ input:focus { outline: none; border-color: var(--accent); }
 .clip .style-controls .lock-note { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .clip video { margin-top: 12px; width: 100%; border-radius: 8px; display: block; }
 .clip .dl-link { font-size: 0.82rem; color: var(--green); }
+.lock-note { color: var(--accent); cursor: pointer; text-decoration: underline; font-size: 0.82rem; }
+
+.save-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+.save-row input[type=text] { flex: 1; min-width: 180px; padding: 8px 12px; font-size: 0.82rem; }
+.save-row button { padding: 8px 14px; font-size: 0.82rem; }
+
+/* ---------- Collections ---------- */
+.collection-section { margin-bottom: 30px; }
+.collection-section:last-child { margin-bottom: 0; }
+.collection-title { font-size: 1rem; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; gap: 9px; }
+.collection-count {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+
+/* ---------- Exports ---------- */
+.platform-presets { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.export-copy-wrap { margin-top: 12px; }
+.export-copy { background: #0d0d13; border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.export-copy-title { font-weight: 700; margin-bottom: 6px; }
+.export-copy-hashtags { color: var(--accent); font-size: 0.85rem; margin-bottom: 8px; }
+.export-copy-desc { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 10px; }
+.export-copy .copy-btn { padding: 7px 14px; font-size: 0.8rem; }
 
 /* ---------- Focus Mode ---------- */
 .focus-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }

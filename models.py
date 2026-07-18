@@ -97,6 +97,38 @@ class DailyUsage(db.Model):
     count = db.Column(db.Integer, default=0, nullable=False)
 
 
+class SavedClip(db.Model):
+    """A clip a user saved into a named collection — from Projects, Focus
+    Mode, or anywhere else clips get rendered. collection_name is a plain
+    string rather than a separate Collection table with a join: users just
+    type a name (existing or new) when saving, which is simpler to build
+    and query, and totally fine at "one person's saved clips" scale.
+
+    export_title/export_hashtags/export_description are filled in lazily
+    by the Exports tab's "Generate export copy" action (LLM call), not at
+    save time — most saved clips probably never get exported, so there's
+    no reason to spend that call up front. export_hashtags is stored as a
+    JSON-encoded list since SQLite/Postgres both handle a plain Text
+    column with zero extra setup, unlike a native array type.
+    """
+
+    __tablename__ = "saved_clips"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    collection_name = db.Column(db.String(120), nullable=False, default="Saved Clips")
+    youtube_url = db.Column(db.String(500), nullable=False)
+    start_seconds = db.Column(db.Float, nullable=False)
+    end_seconds = db.Column(db.Float, nullable=False)
+    hook = db.Column(db.Text, default="")
+    reasoning = db.Column(db.Text, default="")
+    score = db.Column(db.Float, default=0)
+    export_title = db.Column(db.Text, nullable=True)
+    export_hashtags = db.Column(db.Text, nullable=True)  # JSON-encoded list of strings
+    export_description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
 class DiscoverFeed(db.Model):
     """Caches the Discover tab's results so we hit the YouTube Data API
     and the clip scorer (LLM cost!) once per refresh, not once per

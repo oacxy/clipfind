@@ -46,6 +46,14 @@ const focusStatus = document.getElementById('focusStatus');
 const focusResults = document.getElementById('focusResults');
 const focusPresets = document.getElementById('focusPresets');
 
+const collectionsStatus = document.getElementById('collectionsStatus');
+const collectionsList = document.getElementById('collectionsList');
+const refreshCollectionsBtn = document.getElementById('refreshCollectionsBtn');
+
+const exportsStatus = document.getElementById('exportsStatus');
+const exportsList = document.getElementById('exportsList');
+const refreshExportsBtn = document.getElementById('refreshExportsBtn');
+
 let session = { logged_in: false };
 let lastYoutubeUrl = null; // set when the results came from a real video, not the demo
 let discoverLoaded = false;
@@ -53,6 +61,9 @@ let lastDiscoverFeed = []; // full unfiltered feed from the last fetch — categ
 let lastDiscoverComputedAt = null;
 let activeDiscoverCategory = 'all';
 let lastAnalyzeData = null; // { clips, video_duration, isYoutube } from the most recent /api/analyze or /api/demo — feeds the Timeline view
+let collectionsData = null; // { "Collection Name": [savedClip, ...], ... } from the last /api/collections fetch
+let collectionsFetchedOnce = false;
+let collectionNamesCache = []; // flat list of existing collection names, for the save-form autocomplete
 
 // ---------------------------------------------------------------------
 // View switching (sidebar nav)
@@ -87,6 +98,12 @@ function switchView(view) {
   }
   if (view === 'focusmode' && !focusUrlInput.value && lastYoutubeUrl) {
     focusUrlInput.value = lastYoutubeUrl;
+  }
+  if (view === 'collections') {
+    loadCollectionsView(false);
+  }
+  if (view === 'exports') {
+    loadExportsView(false);
   }
 }
 
@@ -545,6 +562,10 @@ function renderClips(clips, isYoutube, container = resultsEl, youtubeUrl = lastY
       ${renderAnalystBreakdown(c.sub_scores, c.suggestions)}
       <div class="style-controls"></div>
       <div class="actions"></div>
+      <div class="save-row" style="display:none;">
+        <input type="text" class="save-name-input" list="collectionNamesList" placeholder="Collection name (e.g. Funny Moments)" />
+        <button type="button" class="secondary save-confirm-btn">Save</button>
+      </div>
       <div class="cut-status"></div>
       <div class="video-wrap"></div>
     `;
@@ -554,6 +575,9 @@ function renderClips(clips, isYoutube, container = resultsEl, youtubeUrl = lastY
     const cutStatus = div.querySelector('.cut-status');
     const videoWrap = div.querySelector('.video-wrap');
     const styleControls = div.querySelector('.style-controls');
+    const saveRow = div.querySelector('.save-row');
+    const saveNameInput = div.querySelector('.save-name-input');
+    const saveConfirmBtn = div.querySelector('.save-confirm-btn');
 
     if (isYoutube) {
       const isPaid = session.is_paid;
@@ -604,11 +628,342 @@ function renderClips(clips, isYoutube, container = resultsEl, youtubeUrl = lastY
           .finally(() => { cutBtn.disabled = false; });
       });
       actions.appendChild(cutBtn);
+
+      const saveBtn = document.createElement('button');
+      saveBtn.type = 'button';
+      saveBtn.className = 'secondary';
+      saveBtn.textContent = 'Save to collection';
+      saveBtn.addEventListener('click', () => {
+        const showing = saveRow.style.display !== 'none';
+        saveRow.style.display = showing ? 'none' : 'flex';
+        if (!showing) {
+          ensureCollectionNamesLoaded();
+          saveNameInput.focus();
+        }
+      });
+      actions.appendChild(saveBtn);
+
+      saveConfirmBtn.addEventListener('click', async () => {
+        const name = saveNameInput.value.trim() || 'Saved Clips';
+        saveConfirmBtn.disabled = true;
+        try {
+          const res = await fetch('/api/collections/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              collection_name: name,
+              youtube_url: youtubeUrl,
+              start_seconds: c.start_seconds,
+              end_seconds: c.end_seconds,
+              hook: c.hook,
+              reasoning: c.reasoning,
+              score: c.score,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            alert(data.error || 'Could not save that clip.');
+            return;
+          }
+          collectionsFetchedOnce = false; // stale — next Collections/Exports visit should refetch
+          saveConfirmBtn.textContent = 'Saved ✓';
+          setTimeout(() => {
+            saveRow.style.display = 'none';
+            saveConfirmBtn.textContent = 'Save';
+            saveNameInput.value = '';
+          }, 1200);
+        } catch (e) {
+          alert('Network error saving clip.');
+        } finally {
+          saveConfirmBtn.disabled = false;
+        }
+      });
     } else {
       cutStatus.textContent = 'Cutting only works on real videos, not the demo transcript.';
     }
   });
 }
+
+// ---------------------------------------------------------------------
+// Collections
+// ---------------------------------------------------------------------
+function populateCollectionDatalist() {
+  const list = document.getElementById('collectionNamesList');
+  if (!list) return;
+  list.innerHTML = '';
+  collectionNamesCache.forEach((name) => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    list.appendChild(opt);
+  });
+}
+
+async function ensureCollectionNamesLoaded() {
+  if (collectionsFetchedOnce) return;
+  try {
+    await fetchCollections(false);
+  } catch (e) {
+    // non-critical — the save form still works without autocomplete suggestions
+  }
+}
+
+async function fetchCollections(force) {
+  if (collectionsFetchedOnce && !force) return collectionsData;
+  const res = await fetch('/api/collections');
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Could not load your saved clips.');
+  collectionsData = data.collections || {};
+  collectionsFetchedOnce = true;
+  collectionNamesCache = Object.keys(collectionsData);
+  populateCollectionDatalist();
+  return collectionsData;
+}
+
+async function loadCollectionsView(force) {
+  collectionsStatus.className = 'status';
+  collectionsStatus.textContent = 'Loading your saved clips...';
+  collectionsList.innerHTML = '';
+  try {
+    const data = await fetchCollections(force);
+    renderCollectionsView(data);
+  } catch (e) {
+    collectionsStatus.className = 'status error';
+    collectionsStatus.textContent = e.message || 'Network error loading your saved clips.';
+  }
+}
+
+function renderCollectionsView(data) {
+  const names = Object.keys(data);
+  collectionsList.innerHTML = '';
+  collectionsStatus.className = 'status';
+
+  if (!names.length) {
+    collectionsStatus.textContent = 'No saved clips yet — hit "Save to collection" on any clip in Projects or Focus Mode.';
+    return;
+  }
+
+  const totalClips = names.reduce((sum, n) => sum + data[n].length, 0);
+  collectionsStatus.textContent = `${totalClips} clip${totalClips === 1 ? '' : 's'} across ${names.length} collection${names.length === 1 ? '' : 's'}.`;
+
+  names.forEach((name) => {
+    const clips = data[name];
+    const section = document.createElement('div');
+    section.className = 'collection-section';
+    section.innerHTML = `<h3 class="collection-title">${name} <span class="collection-count">${clips.length}</span></h3>`;
+    const list = document.createElement('div');
+    list.className = 'results';
+    section.appendChild(list);
+    collectionsList.appendChild(section);
+
+    clips.forEach((c) => {
+      const div = document.createElement('div');
+      div.className = 'clip';
+      div.innerHTML = `
+        <div class="meta"><span>${c.start} – ${c.end}</span><span class="score">score ${c.score}</span></div>
+        <div class="hook">"${c.hook}"</div>
+        ${c.reasoning ? `<div class="reasoning">🧠 ${c.reasoning}</div>` : ''}
+        <div class="actions"></div>
+        <div class="cut-status"></div>
+        <div class="video-wrap"></div>
+      `;
+      list.appendChild(div);
+
+      const actions = div.querySelector('.actions');
+      const cutStatus = div.querySelector('.cut-status');
+      const videoWrap = div.querySelector('.video-wrap');
+
+      const cutBtn = document.createElement('button');
+      cutBtn.className = 'secondary';
+      cutBtn.textContent = 'Cut & download this clip';
+      cutBtn.addEventListener('click', () => {
+        cutBtn.disabled = true;
+        cutClip(c.youtube_url, c.start_seconds, c.end_seconds, cutStatus, videoWrap, {})
+          .finally(() => { cutBtn.disabled = false; });
+      });
+      actions.appendChild(cutBtn);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'secondary';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', async () => {
+        removeBtn.disabled = true;
+        try {
+          const res = await fetch(`/api/collections/clip/${c.id}`, { method: 'DELETE' });
+          if (!res.ok) {
+            const data = await res.json();
+            alert(data.error || 'Could not remove that clip.');
+            removeBtn.disabled = false;
+            return;
+          }
+          collectionsFetchedOnce = false;
+          div.remove();
+          if (!list.children.length) {
+            section.remove();
+          } else {
+            const countBadge = section.querySelector('.collection-count');
+            if (countBadge) countBadge.textContent = String(list.children.length);
+          }
+        } catch (e) {
+          alert('Network error removing clip.');
+          removeBtn.disabled = false;
+        }
+      });
+      actions.appendChild(removeBtn);
+    });
+  });
+}
+refreshCollectionsBtn.addEventListener('click', () => loadCollectionsView(true));
+
+// ---------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------
+const PLATFORM_PRESETS = [
+  { key: 'tiktok', label: 'TikTok', style: 'karaoke_highlight' },
+  { key: 'shorts', label: 'YouTube Shorts', style: 'bold_impact' },
+  { key: 'reels', label: 'Instagram Reels', style: 'boxed' },
+];
+
+async function loadExportsView(force) {
+  exportsStatus.className = 'status';
+  exportsStatus.textContent = 'Loading your saved clips...';
+  exportsList.innerHTML = '';
+  try {
+    const data = await fetchCollections(force);
+    renderExportsView(data);
+  } catch (e) {
+    exportsStatus.className = 'status error';
+    exportsStatus.textContent = e.message || 'Network error loading your saved clips.';
+  }
+}
+
+function renderExportsView(data) {
+  const allClips = Object.values(data).flat();
+  exportsList.innerHTML = '';
+  exportsStatus.className = 'status';
+
+  if (!allClips.length) {
+    exportsStatus.textContent = 'No saved clips yet — save some from Projects or Focus Mode first, then come back here to export them.';
+    return;
+  }
+  exportsStatus.textContent = `${allClips.length} saved clip${allClips.length === 1 ? '' : 's'} ready to export.`;
+
+  allClips.forEach((c) => {
+    const div = document.createElement('div');
+    div.className = 'clip';
+    div.innerHTML = `
+      <div class="meta"><span>${c.start} – ${c.end}</span><span class="score">score ${c.score}</span></div>
+      <div class="hook">"${c.hook}"</div>
+      <div class="platform-presets"></div>
+      <div class="export-copy-wrap"></div>
+      <div class="actions"></div>
+      <div class="cut-status"></div>
+      <div class="video-wrap"></div>
+    `;
+    exportsList.appendChild(div);
+
+    const presetsRow = div.querySelector('.platform-presets');
+    const copyWrap = div.querySelector('.export-copy-wrap');
+    const actions = div.querySelector('.actions');
+    const cutStatus = div.querySelector('.cut-status');
+    const videoWrap = div.querySelector('.video-wrap');
+
+    let selectedPreset = PLATFORM_PRESETS[0];
+
+    function renderExportCopy() {
+      if (!c.export_title && !(c.export_hashtags || []).length && !c.export_description) {
+        copyWrap.innerHTML = '';
+        return;
+      }
+      const hashtagsText = (c.export_hashtags || []).join(' ');
+      copyWrap.innerHTML = `
+        <div class="export-copy">
+          <div class="export-copy-title">${c.export_title || ''}</div>
+          <div class="export-copy-hashtags">${hashtagsText}</div>
+          <div class="export-copy-desc">${c.export_description || ''}</div>
+          <button type="button" class="secondary copy-btn">Copy to clipboard</button>
+        </div>
+      `;
+      copyWrap.querySelector('.copy-btn').addEventListener('click', () => {
+        const fullText = `${c.export_title || ''}\n\n${c.export_description || ''}\n\n${hashtagsText}`.trim();
+        navigator.clipboard.writeText(fullText).then(() => {
+          const btn = copyWrap.querySelector('.copy-btn');
+          if (!btn) return;
+          btn.textContent = 'Copied ✓';
+          setTimeout(() => { btn.textContent = 'Copy to clipboard'; }, 1500);
+        });
+      });
+    }
+    renderExportCopy();
+
+    PLATFORM_PRESETS.forEach((preset) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'preset-chip' + (preset.key === selectedPreset.key ? ' active' : '');
+      chip.textContent = preset.label;
+      chip.addEventListener('click', () => {
+        selectedPreset = preset;
+        presetsRow.querySelectorAll('.preset-chip').forEach((el) => el.classList.remove('active'));
+        chip.classList.add('active');
+        const cutBtn = actions.querySelector('.cut-preset-btn');
+        if (cutBtn) cutBtn.textContent = `Cut for ${selectedPreset.label}`;
+      });
+      presetsRow.appendChild(chip);
+    });
+
+    const genBtn = document.createElement('button');
+    genBtn.type = 'button';
+    genBtn.className = 'secondary';
+    genBtn.textContent = c.export_title ? 'Regenerate export copy' : 'Generate export copy';
+    genBtn.addEventListener('click', async () => {
+      genBtn.disabled = true;
+      genBtn.textContent = 'Generating...';
+      try {
+        const res = await fetch(`/api/collections/clip/${c.id}/export-copy`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ platform: selectedPreset.key }),
+        });
+        const resData = await res.json();
+        if (!res.ok) {
+          alert(resData.error || 'Could not generate export copy.');
+          return;
+        }
+        c.export_title = resData.clip.export_title;
+        c.export_hashtags = resData.clip.export_hashtags;
+        c.export_description = resData.clip.export_description;
+        renderExportCopy();
+      } catch (e) {
+        alert('Network error generating export copy.');
+      } finally {
+        genBtn.disabled = false;
+        genBtn.textContent = 'Regenerate export copy';
+      }
+    });
+    actions.appendChild(genBtn);
+
+    if (session.is_paid) {
+      const cutBtn = document.createElement('button');
+      cutBtn.className = 'secondary cut-preset-btn';
+      cutBtn.textContent = `Cut for ${selectedPreset.label}`;
+      cutBtn.addEventListener('click', () => {
+        cutBtn.disabled = true;
+        cutClip(c.youtube_url, c.start_seconds, c.end_seconds, cutStatus, videoWrap, {
+          captions: true,
+          vertical: true,
+          caption_style: selectedPreset.style,
+        }).finally(() => { cutBtn.disabled = false; });
+      });
+      actions.appendChild(cutBtn);
+    } else {
+      const lockNote = document.createElement('span');
+      lockNote.className = 'lock-note';
+      lockNote.textContent = 'Upgrade to unlock platform-ready cuts (captions + vertical crop)';
+      lockNote.addEventListener('click', () => switchView('settings'));
+      actions.appendChild(lockNote);
+    }
+  });
+}
+refreshExportsBtn.addEventListener('click', () => loadExportsView(true));
 
 // ---------------------------------------------------------------------
 // Analyze / demo
