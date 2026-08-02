@@ -53,6 +53,7 @@ from clipfind import (
     fmt_timestamp,
     parse_timestamp,
     _is_transient_proxy_error,
+    get_cookiefile_path,
 )
 from models import (
     db,
@@ -385,6 +386,14 @@ def cut_youtube_clip(
     if proxy:
         ydl_opts["proxy"] = proxy
 
+    # Real YouTube session cookies, if configured — see
+    # clipfind.get_cookiefile_path for how these get set up. YouTube's
+    # "Sign in to confirm you're not a bot" wall increasingly needs this
+    # alongside the proxy, not just IP-masking on its own.
+    cookiefile = get_cookiefile_path()
+    if cookiefile:
+        ydl_opts["cookiefile"] = cookiefile
+
     # Same fresh-connection-per-retry approach as the transcript fetch in
     # clipfind.py: a rotating residential proxy hands out a new exit IP
     # per new connection, so retrying with a brand new YoutubeDL instance
@@ -410,6 +419,28 @@ def cut_youtube_clip(
         shutil.rmtree(workdir, ignore_errors=True)
         msg = str(download_error)
         if "blocking requests from your IP" in msg or "Sign in to confirm" in msg or "not a bot" in msg:
+            if cookiefile:
+                # Cookies ARE configured and this still happened — most
+                # likely the exported cookies file has expired (YouTube
+                # session cookies don't last forever) and needs
+                # re-exporting from a real logged-in browser session.
+                raise RuntimeError(
+                    "YouTube's bot-detection is still blocking downloads even with cookies "
+                    "configured — the cookies file has likely expired. Re-export cookies.txt "
+                    "from a logged-in YouTube session and update the Secret File/YOUTUBE_COOKIES_PATH."
+                )
+            if proxy:
+                # This message used to blame missing/misconfigured proxy
+                # env vars unconditionally, which is wrong once a proxy
+                # IS actually configured — this specific wall is
+                # YouTube's stricter "Sign in to confirm you're not a
+                # bot" check, which a plain residential proxy doesn't
+                # reliably get past on its own anymore.
+                raise RuntimeError(
+                    "YouTube's bot-detection is blocking video downloads even through the "
+                    "configured proxy. This needs real YouTube session cookies passed to yt-dlp — "
+                    "see DEPLOY.md ('YouTube cookies' section) for how to set that up."
+                )
             raise RuntimeError(
                 "YouTube is blocking video downloads from this server's IP — check the "
                 "WEBSHARE_PROXY_USERNAME/PASSWORD env vars are set correctly."
@@ -1233,6 +1264,35 @@ def generate_clip_export_copy(clip_id):
     db.session.commit()
 
     return jsonify({"clip": saved_clip_to_json(clip)})
+
+
+@app.route("/api/cron/refresh-discover", methods=["GET", "POST"])
+def cron_refresh_discover():
+    """Refreshes the Discover feed on a schedule instead of leaving it to
+    happen inside whichever live user request happens to hit a stale
+    cache. That in-request refresh path is still there (in
+    _get_or_refresh_feed, used by /api/discover) as a fallback for when
+    this cron hasn't run recently enough — but it's expensive (up to 16
+    candidates, several concurrent transcript-fetch + LLM calls) and was
+    confirmed to have caused a live Render OOM kill that crashed an
+    unrelated in-flight request. Pinging this every ~2 hours (comfortably
+    under DISCOVER_MAX_AGE's 3-hour staleness window) means real users
+    should essentially never hit the slow path. Same external-scheduler
+    setup as /api/cron/send-digest — see DEPLOY.md."""
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET is not configured on this server."}), 500
+    if request.args.get("secret") != CRON_SECRET:
+        return jsonify({"error": "Forbidden."}), 403
+
+    try:
+        feed, row = _get_or_refresh_feed(force=False)
+    except Exception as e:
+        return jsonify({"error": f"Couldn't refresh the discover feed ({e})."}), 502
+
+    return jsonify({
+        "feed_size": len(feed),
+        "computed_at": row.computed_at.isoformat() if row else None,
+    })
 
 
 @app.route("/api/cron/send-digest", methods=["GET", "POST"])

@@ -65,7 +65,17 @@ FEED_SIZE = 16  # how many final picks to show/store — bumped alongside the
 # the round-robin selection below (see build_discover_feed) can give every
 # category up to 2 scoring attempts before any category gets a 3rd.
 MAX_CANDIDATES_TO_ATTEMPT = 16
-SCORING_CONCURRENCY = 6
+# Lowered from 6 -> 3: this refresh runs inside the single gunicorn worker
+# that also handles every other live request (analyze, cut, etc.) on a
+# 512MB Render instance. 6 simultaneous transcript-fetch + LLM-call
+# operations was a real memory spike, confirmed live via a Render "Ran out
+# of memory (used over 512MB)" instance-kill event that took down an
+# unrelated in-flight request with it. Lower concurrency means this
+# refresh takes a bit longer, but a slower refresh beats crashing the
+# whole app. See app.py's /api/cron/refresh-discover for the real fix
+# (moving this off the live request path entirely) — this constant is a
+# supporting mitigation, not a substitute for that.
+SCORING_CONCURRENCY = 3
 
 
 def _api_key() -> str:

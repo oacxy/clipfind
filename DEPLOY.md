@@ -56,6 +56,43 @@ It's not a bug and retrying won't fix it. The fix:
    through the proxy automatically when they're present.
 5. Test `/api/analyze` again with a real video URL.
 
+## YouTube cookies (fixing "Sign in to confirm you're not a bot")
+
+The Webshare proxy above fixes the plain IP-block case. Separately,
+YouTube has a stricter bot-detection wall — errors mentioning "Sign in to
+confirm you're not a bot" or "not a bot" — that a proxy alone often
+doesn't get past anymore, even when it's working correctly. This needs
+real cookies from a logged-in YouTube session, passed to yt-dlp/the
+transcript fetcher alongside the proxy (not instead of it — keep both).
+
+**Heads up before you do this**: this uses cookies from a real YouTube
+account's browser session. Keep expectations in check — cookies expire
+periodically (typically weeks to a couple months) and need re-exporting
+when they do, and using an account's session for automated requests at
+volume carries some risk of that account getting flagged by YouTube.
+Consider using a secondary/throwaway Google account rather than your
+main one.
+
+1. Log into YouTube in a normal browser with the account you're using
+   for this, then export cookies in **Netscape cookie file format**
+   (`.txt`) — the "Get cookies.txt LOCALLY" extension (Chrome/Firefox)
+   is a common way to do this. Save it as `youtube_cookies.txt`.
+2. In Render → your service → **Environment** tab → **Secret Files** →
+   add a new secret file. Set the filename/path to
+   `/etc/secrets/youtube_cookies.txt` and paste in the file's contents.
+   Render writes it to that exact path in the container at deploy time —
+   the app already checks that path automatically, no env var needed.
+   (Alternatively, set `YOUTUBE_COOKIES_PATH` to a different path if you
+   store it somewhere else.)
+3. Redeploy. Both `/api/cut` (yt-dlp) and `/api/analyze`/`/api/focus`
+   (transcript fetching) pick up the cookies file automatically if it's
+   present — nothing else to configure.
+4. Test a video that was previously failing with the "Sign in to
+   confirm"/"not a bot" error.
+5. If it starts failing again later with the same error, the cookies
+   have likely expired — re-export step 1 and replace the Secret File's
+   contents.
+
 ## Switching to Docker (needed for real video cutting)
 
 `/api/cut` downloads video and trims it with `ffmpeg`, which is a system
@@ -242,6 +279,48 @@ paid line item. Simpler zero-cost path: a free external pinger.
 
 The response is JSON (`{"sent": N, "failed": N}`) so cron-job.org's
 execution history doubles as a lightweight send log.
+
+### 4. A second cron ping to keep the Discover feed warm (important)
+
+`/api/discover` serves a cached feed, but if nobody's hit it in the last 3
+hours, the *next* visitor's request pays for a full refresh — up to 16
+transcript-fetch + LLM-scoring calls, several running concurrently. On a
+memory-constrained instance (Render's Starter tier is 512MB) this has
+caused a real "Ran out of memory" instance kill that took down an
+unrelated in-flight request with it (surfaced to that user as a generic
+network error, with no useful message). Keeping the cache warm via a
+scheduled ping avoids live users ever paying for that refresh:
+
+1. In the same cron-job.org account, add a second cron job:
+   `https://clipfind-v2.onrender.com/api/cron/refresh-discover?secret=YOUR_CRON_SECRET`
+   (same `CRON_SECRET` as above).
+2. Set the schedule to every 2 hours (comfortably under the 3-hour
+   staleness window, so real users should essentially never trigger the
+   slow path themselves).
+3. Save, test with "Run now", confirm you get back
+   `{"feed_size": N, "computed_at": "..."}`.
+
+This doesn't eliminate memory pressure entirely — it's paired with a
+lower concurrency setting in `discover.py` (`SCORING_CONCURRENCY`) as a
+second mitigation — but it removes the single biggest, most reproducible
+cause of it. See "Upgrading your Render instance" below for the actual
+fix to the underlying constraint.
+
+### Upgrading your Render instance (fixes the root cause, not just symptoms)
+
+The two mitigations above reduce how often memory pressure happens, but
+the real constraint is Render's **Starter** tier only giving the whole
+app 512MB RAM, shared across every request — and gunicorn is currently
+running a single worker, so the entire app is one process with no
+isolation between requests. Any single memory-heavy operation (video
+encoding, a Discover refresh, a spike in concurrent users) can still tip
+it over and take everything else down with it.
+
+Render → your service → **Settings** → **Instance Type** → upgrade from
+Starter to **Standard** (2 GB RAM / 1 CPU). This also directly helps
+video-cutting speed (more CPU for ffmpeg) and lets multiple users be
+served without queuing behind each other. Saving triggers an automatic
+redeploy — no code changes needed.
 
 ## Cost and scope to know about before charging anyone
 
