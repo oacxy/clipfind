@@ -172,6 +172,36 @@
                 <div class="timeline-track" id="timelineTrack"></div>
                 <div class="timeline-ruler" id="timelineRuler"></div>
               </div>
+
+              <div class="manual-editor" id="manualEditor" style="display:none;">
+                <div class="manual-editor-header">
+                  <h3>Cut a custom range</h3>
+                  <p>Drag the handles below to select any part of the video — not limited to what the AI found.</p>
+                </div>
+                <div class="manual-range-track" id="manualRangeTrack">
+                  <div class="manual-range-fill" id="manualRangeFill"></div>
+                  <div class="manual-range-handle" id="manualHandleStart" data-handle="start"></div>
+                  <div class="manual-range-handle" id="manualHandleEnd" data-handle="end"></div>
+                </div>
+                <div class="manual-time-row">
+                  <label>Start <input type="text" id="manualStartInput" /></label>
+                  <label>End <input type="text" id="manualEndInput" /></label>
+                  <span class="manual-duration" id="manualDuration"></span>
+                </div>
+                <div class="manual-preview-wrap" id="manualPreviewWrap" style="display:none;"></div>
+                <button type="button" class="secondary" id="manualPreviewBtn">Preview selection</button>
+                <div class="style-controls" id="manualStyleControls"></div>
+                <div class="row" style="margin-top:14px;">
+                  <button type="button" id="manualCutBtn">Cut this range</button>
+                  <button type="button" class="secondary" id="manualSaveBtn">Save to collection</button>
+                </div>
+                <div class="save-row" id="manualSaveRow" style="display:none;">
+                  <input type="text" id="manualSaveNameInput" list="collectionNamesList" placeholder="Collection name (e.g. Funny Moments)" />
+                  <button type="button" class="secondary" id="manualSaveConfirmBtn">Save</button>
+                </div>
+                <div class="cut-status" id="manualCutStatus"></div>
+                <div class="video-wrap" id="manualVideoWrap"></div>
+              </div>
             </div>
           </div>
 

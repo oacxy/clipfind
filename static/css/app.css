@@ -637,6 +637,49 @@ input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px 
 .timeline-ruler { position: relative; height: 20px; margin-top: 7px; }
 .timeline-tick { position: absolute; transform: translateX(-50%); font-size: 0.7rem; color: var(--text-dimmer); white-space: nowrap; }
 
+/* ---------- Manual clip editor (custom trim, not AI-suggested) ---------- */
+.manual-editor { margin-top: 30px; padding-top: 26px; border-top: 1px solid var(--border-soft); }
+.manual-editor-header h3 { font-size: 0.95rem; font-weight: 700; margin-bottom: 4px; }
+.manual-editor-header p { font-size: 0.82rem; color: var(--text-dim); margin-bottom: 18px; line-height: 1.5; }
+.manual-range-track {
+  position: relative;
+  height: 44px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  margin-bottom: 16px;
+  cursor: pointer;
+}
+.manual-range-fill {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: var(--accent-soft);
+  border-left: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  pointer-events: none;
+}
+.manual-range-handle {
+  position: absolute;
+  top: 50%;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  border: 2px solid #fff;
+  transform: translate(-50%, -50%);
+  cursor: ew-resize;
+  box-shadow: var(--shadow-sm);
+  z-index: 2;
+  touch-action: none;
+}
+.manual-range-handle:hover, .manual-range-handle:active { filter: brightness(1.1); }
+.manual-time-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+.manual-time-row label { display: flex; align-items: center; gap: 8px; font-size: 0.82rem; color: var(--text-dim); }
+.manual-time-row input[type=text] { width: 90px; min-width: 0; padding: 8px 10px; font-size: 0.85rem; }
+.manual-duration { font-size: 0.82rem; color: var(--text-dimmer); }
+.manual-preview-wrap { margin-bottom: 14px; }
+.manual-preview-wrap iframe { width: 100%; aspect-ratio: 16/9; border-radius: var(--r-sm); border: 1px solid var(--border); display: block; }
+.manual-editor .style-controls { margin-top: 16px; }
+
 .clip.flash { animation: flash-highlight 1.5s ease; }
 @keyframes flash-highlight {
   0% { box-shadow: 0 0 0 2px var(--accent); }

@@ -51,6 +51,25 @@ const timelineWrap = document.getElementById('timelineWrap');
 const timelineTrack = document.getElementById('timelineTrack');
 const timelineRuler = document.getElementById('timelineRuler');
 
+const manualEditor = document.getElementById('manualEditor');
+const manualRangeTrack = document.getElementById('manualRangeTrack');
+const manualRangeFill = document.getElementById('manualRangeFill');
+const manualHandleStart = document.getElementById('manualHandleStart');
+const manualHandleEnd = document.getElementById('manualHandleEnd');
+const manualStartInput = document.getElementById('manualStartInput');
+const manualEndInput = document.getElementById('manualEndInput');
+const manualDuration = document.getElementById('manualDuration');
+const manualPreviewWrap = document.getElementById('manualPreviewWrap');
+const manualPreviewBtn = document.getElementById('manualPreviewBtn');
+const manualStyleControls = document.getElementById('manualStyleControls');
+const manualCutBtn = document.getElementById('manualCutBtn');
+const manualSaveBtn = document.getElementById('manualSaveBtn');
+const manualSaveRow = document.getElementById('manualSaveRow');
+const manualSaveNameInput = document.getElementById('manualSaveNameInput');
+const manualSaveConfirmBtn = document.getElementById('manualSaveConfirmBtn');
+const manualCutStatus = document.getElementById('manualCutStatus');
+const manualVideoWrap = document.getElementById('manualVideoWrap');
+
 const focusUrlInput = document.getElementById('focusUrlInput');
 const focusQueryInput = document.getElementById('focusQueryInput');
 const focusBtn = document.getElementById('focusBtn');
@@ -88,6 +107,9 @@ let collectionsData = null; // { "Collection Name": [savedClip, ...], ... } from
 let collectionsFetchedOnce = false;
 let collectionNamesCache = []; // flat list of existing collection names, for the save-form autocomplete
 let currentProject = null; // { id, youtube_url, clips, video_duration, scoring_method, isYoutube } — the project workspace currently open
+let manualSelStart = 0; // seconds — the custom trim editor's current selection
+let manualSelEnd = 30;
+let manualDragHandle = null; // 'start' | 'end' | null — which handle is being dragged, if any
 let projectListCache = [];
 let projectListFetchedOnce = false;
 // Captured once at page load — someone arriving via clipfind.com/?ref=CODE
@@ -516,6 +538,236 @@ function renderTimeline() {
     tick.textContent = formatSeconds((duration / tickCount) * i);
     timelineRuler.appendChild(tick);
   }
+}
+
+// ---------------------------------------------------------------------
+// Manual clip editor — cut ANY custom range, not just AI-suggested
+// clips. Lives on the Timeline tab since that's already the
+// full-video-overview surface. Reuses cutClip()/style-controls/
+// save-to-collection exactly like the AI clip cards do, so a manual
+// selection is a first-class clip, not a second-class feature.
+// ---------------------------------------------------------------------
+function parseTimeToSeconds(text) {
+  const parts = String(text).trim().split(':').map((p) => parseFloat(p));
+  if (!parts.length || parts.some((p) => isNaN(p) || p < 0)) return null;
+  let seconds = 0;
+  for (const p of parts) seconds = seconds * 60 + p;
+  return seconds;
+}
+
+function manualDuration_() {
+  return Math.max((lastAnalyzeData && lastAnalyzeData.video_duration) || 1, 1);
+}
+
+function renderManualEditorPositions() {
+  const duration = manualDuration_();
+  const startPct = (manualSelStart / duration) * 100;
+  const endPct = (manualSelEnd / duration) * 100;
+  manualHandleStart.style.left = `${startPct}%`;
+  manualHandleEnd.style.left = `${endPct}%`;
+  manualRangeFill.style.left = `${startPct}%`;
+  manualRangeFill.style.width = `${Math.max(endPct - startPct, 0)}%`;
+  manualStartInput.value = formatSeconds(manualSelStart);
+  manualEndInput.value = formatSeconds(manualSelEnd);
+  manualDuration.textContent = `${formatSeconds(manualSelEnd - manualSelStart)} selected`;
+  // Selection changed — the preview iframe (if shown) no longer matches
+  // it, so hide it rather than show a stale range until "Preview" is
+  // pressed again.
+  manualPreviewWrap.style.display = 'none';
+  manualPreviewWrap.innerHTML = '';
+}
+
+function setManualSelection(start, end) {
+  const duration = manualDuration_();
+  const minGap = 1; // seconds — handles can't cross/overlap
+  start = Math.max(0, Math.min(start, duration));
+  end = Math.max(0, Math.min(end, duration));
+  if (end - start < minGap) {
+    if (manualDragHandle === 'start') start = Math.max(0, end - minGap);
+    else end = Math.min(duration, start + minGap);
+  }
+  manualSelStart = start;
+  manualSelEnd = end;
+  renderManualEditorPositions();
+}
+
+function trackPositionToSeconds(clientX) {
+  const rect = manualRangeTrack.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  return pct * manualDuration_();
+}
+
+function initManualEditorDrag() {
+  [manualHandleStart, manualHandleEnd].forEach((handle) => {
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      manualDragHandle = handle.dataset.handle;
+    });
+    handle.addEventListener('touchstart', (e) => {
+      manualDragHandle = handle.dataset.handle;
+    }, { passive: true });
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!manualDragHandle) return;
+    const seconds = trackPositionToSeconds(e.clientX);
+    if (manualDragHandle === 'start') setManualSelection(seconds, manualSelEnd);
+    else setManualSelection(manualSelStart, seconds);
+  });
+  document.addEventListener('touchmove', (e) => {
+    if (!manualDragHandle || !e.touches.length) return;
+    const seconds = trackPositionToSeconds(e.touches[0].clientX);
+    if (manualDragHandle === 'start') setManualSelection(seconds, manualSelEnd);
+    else setManualSelection(manualSelStart, seconds);
+  }, { passive: true });
+  document.addEventListener('mouseup', () => { manualDragHandle = null; });
+  document.addEventListener('touchend', () => { manualDragHandle = null; });
+
+  // Clicking empty track space (not a handle) jumps the nearer handle
+  // there — quicker than dragging from wherever it currently sits.
+  manualRangeTrack.addEventListener('mousedown', (e) => {
+    if (e.target === manualHandleStart || e.target === manualHandleEnd) return;
+    const seconds = trackPositionToSeconds(e.clientX);
+    const distToStart = Math.abs(seconds - manualSelStart);
+    const distToEnd = Math.abs(seconds - manualSelEnd);
+    if (distToStart <= distToEnd) setManualSelection(seconds, manualSelEnd);
+    else setManualSelection(manualSelStart, seconds);
+  });
+
+  manualStartInput.addEventListener('change', () => {
+    const val = parseTimeToSeconds(manualStartInput.value);
+    if (val === null) { renderManualEditorPositions(); return; }
+    setManualSelection(val, manualSelEnd);
+  });
+  manualEndInput.addEventListener('change', () => {
+    const val = parseTimeToSeconds(manualEndInput.value);
+    if (val === null) { renderManualEditorPositions(); return; }
+    setManualSelection(manualSelStart, val);
+  });
+}
+initManualEditorDrag();
+
+manualPreviewBtn.addEventListener('click', () => {
+  const videoId = extractYoutubeVideoId(lastYoutubeUrl);
+  if (!videoId) return;
+  const start = Math.round(manualSelStart);
+  const end = Math.round(manualSelEnd);
+  manualPreviewWrap.innerHTML = `<iframe src="https://www.youtube.com/embed/${videoId}?start=${start}&end=${end}" allow="accelerate-compute; autoplay; encrypted-media" allowfullscreen></iframe>`;
+  manualPreviewWrap.style.display = 'block';
+});
+
+function renderManualStyleControls() {
+  manualStyleControls.innerHTML = '';
+  const isPaid = session.is_paid;
+  const styleSelect = document.createElement('select');
+  CAPTION_STYLES.forEach((s) => {
+    const opt = document.createElement('option');
+    opt.value = s.value;
+    opt.textContent = s.label;
+    styleSelect.appendChild(opt);
+  });
+  const captionsLabel = document.createElement('label');
+  const captionsCheck = document.createElement('input');
+  captionsCheck.type = 'checkbox';
+  captionsLabel.appendChild(captionsCheck);
+  captionsLabel.append(' Captions');
+
+  const verticalLabel = document.createElement('label');
+  const verticalCheck = document.createElement('input');
+  verticalCheck.type = 'checkbox';
+  verticalLabel.appendChild(verticalCheck);
+  verticalLabel.append(' Vertical (9:16)');
+
+  manualStyleControls.appendChild(captionsLabel);
+  manualStyleControls.appendChild(styleSelect);
+  manualStyleControls.appendChild(verticalLabel);
+
+  if (!isPaid) {
+    manualStyleControls.classList.add('locked');
+    captionsCheck.disabled = true;
+    verticalCheck.disabled = true;
+    styleSelect.disabled = true;
+    const lockNote = document.createElement('span');
+    lockNote.className = 'lock-note';
+    lockNote.textContent = 'Upgrade to unlock styled captions & vertical crop';
+    lockNote.addEventListener('click', () => switchView('settings'));
+    manualStyleControls.appendChild(lockNote);
+  } else {
+    manualStyleControls.classList.remove('locked');
+  }
+
+  manualCutBtn.onclick = () => {
+    manualCutBtn.disabled = true;
+    const extras = isPaid
+      ? { captions: captionsCheck.checked, caption_style: styleSelect.value, vertical: verticalCheck.checked }
+      : {};
+    cutClip(lastYoutubeUrl, manualSelStart, manualSelEnd, manualCutStatus, manualVideoWrap, extras)
+      .finally(() => { manualCutBtn.disabled = false; });
+  };
+}
+
+manualSaveBtn.addEventListener('click', () => {
+  const showing = manualSaveRow.style.display !== 'none';
+  manualSaveRow.style.display = showing ? 'none' : 'flex';
+  if (!showing) {
+    ensureCollectionNamesLoaded();
+    manualSaveNameInput.focus();
+  }
+});
+manualSaveConfirmBtn.addEventListener('click', async () => {
+  const name = manualSaveNameInput.value.trim() || 'Saved Clips';
+  manualSaveConfirmBtn.disabled = true;
+  try {
+    const res = await fetch('/api/collections/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        collection_name: name,
+        youtube_url: lastYoutubeUrl,
+        start_seconds: manualSelStart,
+        end_seconds: manualSelEnd,
+        hook: 'Custom clip',
+        reasoning: '',
+        score: 0,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || 'Could not save that clip.');
+      return;
+    }
+    collectionsFetchedOnce = false;
+    manualSaveConfirmBtn.textContent = 'Saved ✓';
+    setTimeout(() => {
+      manualSaveRow.style.display = 'none';
+      manualSaveConfirmBtn.textContent = 'Save';
+      manualSaveNameInput.value = '';
+    }, 1200);
+  } catch (e) {
+    alert('Network error saving that clip.');
+  } finally {
+    manualSaveConfirmBtn.disabled = false;
+  }
+});
+
+function renderManualEditor() {
+  if (!lastAnalyzeData || !lastAnalyzeData.isYoutube || !lastYoutubeUrl) {
+    // No real source video to cut from (e.g. viewing the demo transcript) —
+    // same gate the AI clip cards already use for their cut/save actions.
+    manualEditor.style.display = 'none';
+    return;
+  }
+  manualEditor.style.display = 'block';
+  const duration = manualDuration_();
+  // Default to the first 30s (or the whole video if shorter) rather than
+  // carrying over a stale selection from a previously-viewed project.
+  manualSelStart = 0;
+  manualSelEnd = Math.min(30, duration);
+  renderManualEditorPositions();
+  renderManualStyleControls();
+  manualCutStatus.textContent = '';
+  manualVideoWrap.innerHTML = '';
+  manualSaveRow.style.display = 'none';
 }
 
 // ---------------------------------------------------------------------
@@ -1125,6 +1377,7 @@ function openProjectWorkspace(meta) {
 
   renderClips(meta.clips, meta.isYoutube, resultsEl, meta.youtube_url);
   renderTimeline();
+  renderManualEditor();
   renderAnalystSummary(meta);
   renderVideoSummary(meta);
 }
