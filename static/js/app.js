@@ -66,6 +66,17 @@ const exportsStatus = document.getElementById('exportsStatus');
 const exportsList = document.getElementById('exportsList');
 const refreshExportsBtn = document.getElementById('refreshExportsBtn');
 
+const dashUserName = document.getElementById('dashUserName');
+const dashNewProjectBtn = document.getElementById('dashNewProjectBtn');
+const dashUrlInput = document.getElementById('dashUrlInput');
+const dashAnalyzeBtn = document.getElementById('dashAnalyzeBtn');
+const dashStatus = document.getElementById('dashStatus');
+const dashActionsGrid = document.getElementById('dashActionsGrid');
+const dashProjectsGrid = document.getElementById('dashProjectsGrid');
+const dashViewAllProjects = document.getElementById('dashViewAllProjects');
+const dashAnalystWidget = document.getElementById('dashAnalystWidget');
+const dashTopClipsWidget = document.getElementById('dashTopClipsWidget');
+
 let session = { logged_in: false };
 let lastYoutubeUrl = null; // set when the results came from a real video, not the demo
 let discoverLoaded = false;
@@ -144,6 +155,10 @@ const VIEW_TITLES = {
   discover: 'Discover',
   collections: 'Collections',
   exports: 'Exports',
+  storystudio: 'Story Studio',
+  seriesmode: 'Series Mode',
+  publishing: 'Publishing',
+  brandkit: 'Brand Kit',
   templates: 'Templates',
   analytics: 'Analytics',
   team: 'Team',
@@ -158,6 +173,9 @@ function switchView(view) {
     el.classList.toggle('active', el.id === `view-${view}`);
   });
   topbarTitle.textContent = VIEW_TITLES[view] || 'ClipFind';
+  if (view === 'dashboard') {
+    renderDashboard();
+  }
   if (view === 'discover' && !discoverLoaded) {
     loadDiscover(false);
   }
@@ -1284,6 +1302,222 @@ async function openProjectById(id) {
 }
 
 // ---------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------
+function extractYoutubeVideoId(url) {
+  if (!url) return null;
+  const m = String(url).match(/(?:v=|\/videos\/|embed\/|shorts\/|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+function youtubeThumbUrl(url) {
+  const id = extractYoutubeVideoId(url);
+  return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : '';
+}
+
+const DASH_QUICK_ACTIONS = [
+  {
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5a1 1 0 0 1 1-1H9l2 2.2h8.5a1 1 0 0 1 1 1V17a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z"/></svg>',
+    color: 'linear-gradient(135deg, var(--accent), var(--accent2))',
+    title: 'AI Clip Finder', sub: 'Find viral-worthy clips', view: 'projects',
+  },
+  {
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></svg>',
+    color: 'linear-gradient(135deg, #3ddc97, #2bb37c)',
+    title: 'AI Focus Mode', sub: 'Search for exact moments', view: 'focusmode',
+  },
+  {
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c1 3-3 4-3 7.5a3 3 0 0 0 6 0c0-1.2-.6-2-.6-2 1.8 1 3.1 3 3.1 5.2A5.5 5.5 0 0 1 12 19a5.5 5.5 0 0 1-5.5-5.5C6.5 8.5 10 8 12 3z"/></svg>',
+    color: 'linear-gradient(135deg, #ffc857, #e8a83e)',
+    title: 'Discover', sub: 'Trending videos to clip', view: 'discover',
+  },
+  {
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1z"/></svg>',
+    color: 'linear-gradient(135deg, #5c8cff, #7c5cff)',
+    title: 'Collections', sub: 'Your saved clips', view: 'collections',
+  },
+  {
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M12 4 8 8M12 4l4 4"/><path d="M4.5 14v4.5a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5V14"/></svg>',
+    color: 'linear-gradient(135deg, #ff5c9a, #ff8c5c)',
+    title: 'Exports', sub: 'Titles, hashtags, captions', view: 'exports',
+  },
+  {
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c.7 2.2-1.8 3-1.8 5.2a1.8 1.8 0 0 0 3.6 0c0-.7-.3-1.2-.3-1.2 1 .6 1.8 1.8 1.8 3.1A3.3 3.3 0 0 1 12 14a3.3 3.3 0 0 1-3.3-3.3C8.7 7.8 10.9 6 12 3.5z"/><path d="M6 15.5h12M7.5 18.5h9M9 21.5h6"/></svg>',
+    color: 'linear-gradient(135deg, #7c5cff, #ff5c9a)',
+    title: 'Story Studio', sub: 'AI narrated story videos', view: 'storystudio', soon: true,
+  },
+];
+
+function renderDashActions() {
+  dashActionsGrid.innerHTML = DASH_QUICK_ACTIONS.map((a, i) => `
+    <div class="dash-action-card${a.soon ? ' soon' : ''}" data-action-idx="${i}">
+      <div class="dash-action-icon" style="background:${a.color};">${a.icon}</div>
+      <div class="dash-action-title">${a.title}${a.soon ? ' <span class="soon-badge">soon</span>' : ''}</div>
+      <div class="dash-action-sub">${a.sub}</div>
+    </div>
+  `).join('');
+  dashActionsGrid.querySelectorAll('.dash-action-card').forEach((el) => {
+    el.addEventListener('click', () => {
+      const action = DASH_QUICK_ACTIONS[Number(el.dataset.actionIdx)];
+      if (action.soon) return;
+      switchView(action.view);
+    });
+  });
+}
+
+function renderDashProjects() {
+  const recent = projectListCache.slice(0, 6);
+  if (!recent.length) {
+    dashProjectsGrid.innerHTML = `<div class="dash-empty-mini" style="grid-column:1/-1;">No projects yet — paste a link above to analyze your first video.</div>`;
+    return;
+  }
+  dashProjectsGrid.innerHTML = recent.map((p) => {
+    const thumb = youtubeThumbUrl(p.youtube_url);
+    const date = new Date(p.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const label = extractYoutubeVideoId(p.youtube_url) || p.youtube_url;
+    return `
+      <div class="dash-project-card" data-project-id="${p.id}">
+        <div class="dash-project-thumb" style="${thumb ? `background-image:url('${thumb}')` : ''}">
+          <div class="dash-project-score">${p.top_score}</div>
+        </div>
+        <div class="dash-project-body">
+          <div class="dash-project-title">${label}</div>
+          <div class="dash-project-meta">${p.clip_count} clip${p.clip_count === 1 ? '' : 's'} · ${date}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+  dashProjectsGrid.querySelectorAll('.dash-project-card').forEach((el) => {
+    el.addEventListener('click', () => {
+      switchView('projects');
+      openProjectById(Number(el.dataset.projectId));
+    });
+  });
+}
+
+function renderDashAnalystWidget() {
+  const scores = projectListCache.map((p) => p.top_score).filter((s) => typeof s === 'number');
+  if (!scores.length) {
+    dashAnalystWidget.innerHTML = `
+      <div class="dash-widget-title">AI Analyst Overview</div>
+      <div class="dash-empty-mini">Analyze a video to see your score breakdown here.</div>
+    `;
+    return;
+  }
+  const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+  const bucketCounts = { excellent: 0, good: 0, average: 0, poor: 0 };
+  scores.forEach((s) => {
+    if (s >= 85) bucketCounts.excellent++;
+    else if (s >= 70) bucketCounts.good++;
+    else if (s >= 50) bucketCounts.average++;
+    else bucketCounts.poor++;
+  });
+  const total = scores.length;
+  const order = ['excellent', 'good', 'average', 'poor'];
+  const labels = { excellent: 'Excellent (85+)', good: 'Good (70-84)', average: 'Average (50-69)', poor: 'Poor (<50)' };
+  const colors = { excellent: 'var(--green)', good: '#5c8cff', average: 'var(--yellow)', poor: 'var(--red)' };
+  const pcts = {};
+  order.forEach((k) => { pcts[k] = Math.round((bucketCounts[k] / total) * 100); });
+
+  let acc = 0;
+  const stops = order.map((k) => {
+    const start = acc;
+    acc += pcts[k];
+    return `${colors[k]} ${start}% ${acc}%`;
+  }).join(', ');
+
+  const legendRows = order.map((k) => `
+    <div class="dash-score-legend-row"><i style="background:${colors[k]};"></i><span class="label">${labels[k]}</span><span class="pct">${pcts[k]}%</span></div>
+  `).join('');
+
+  dashAnalystWidget.innerHTML = `
+    <div class="dash-widget-title">AI Analyst Overview</div>
+    <div class="dash-score-gauge-wrap">
+      <div class="dash-score-gauge" style="background: conic-gradient(${stops});">
+        <div class="dash-score-gauge-val">${Math.round(avg)}</div>
+      </div>
+      <div class="dash-score-legend">${legendRows}</div>
+    </div>
+  `;
+}
+
+function renderDashTopClipsWidget() {
+  const top = [...projectListCache]
+    .filter((p) => p.clip_count > 0)
+    .sort((a, b) => b.top_score - a.top_score)
+    .slice(0, 3);
+  if (!top.length) {
+    dashTopClipsWidget.innerHTML = `
+      <div class="dash-widget-title">Top Performing Clips</div>
+      <div class="dash-empty-mini">Nothing scored yet.</div>
+    `;
+    return;
+  }
+  const rows = top.map((p) => {
+    const thumb = youtubeThumbUrl(p.youtube_url);
+    const label = extractYoutubeVideoId(p.youtube_url) || p.youtube_url;
+    return `
+      <div class="dash-top-clip-row" data-project-id="${p.id}">
+        <div class="dash-top-clip-thumb" style="${thumb ? `background-image:url('${thumb}')` : ''}"></div>
+        <div class="dash-top-clip-info">
+          <div class="dash-top-clip-title">${label}</div>
+          <div class="dash-top-clip-meta">${p.clip_count} clip${p.clip_count === 1 ? '' : 's'} found</div>
+        </div>
+        <div class="dash-top-clip-score">${p.top_score}</div>
+      </div>
+    `;
+  }).join('');
+  dashTopClipsWidget.innerHTML = `<div class="dash-widget-title">Top Performing Clips</div>${rows}`;
+  dashTopClipsWidget.querySelectorAll('.dash-top-clip-row').forEach((el) => {
+    el.addEventListener('click', () => {
+      switchView('projects');
+      openProjectById(Number(el.dataset.projectId));
+    });
+  });
+}
+
+async function renderDashboard() {
+  const name = (session.email || '').split('@')[0];
+  dashUserName.textContent = name ? `, ${name}` : '';
+  renderDashActions();
+  if (!projectListFetchedOnce) {
+    await loadProjectList(false);
+  }
+  renderDashProjects();
+  renderDashAnalystWidget();
+  renderDashTopClipsWidget();
+}
+
+dashNewProjectBtn.addEventListener('click', () => {
+  switchView('projects');
+  showProjectsList();
+  urlInput.focus();
+});
+
+dashViewAllProjects.addEventListener('click', (e) => {
+  e.preventDefault();
+  switchView('projects');
+});
+
+dashAnalyzeBtn.addEventListener('click', () => {
+  const url = dashUrlInput.value.trim();
+  if (!url) {
+    dashStatus.className = 'status error';
+    dashStatus.textContent = 'Paste a YouTube URL first.';
+    return;
+  }
+  dashStatus.className = 'status';
+  dashStatus.textContent = '';
+  urlInput.value = url;
+  switchView('projects');
+  showProjectsList();
+  run('/api/analyze', { youtube_url: url, top: 6 });
+});
+dashUrlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') dashAnalyzeBtn.click();
+});
+
+// ---------------------------------------------------------------------
 // Analyze / demo
 // ---------------------------------------------------------------------
 async function run(endpoint, body) {
@@ -1360,5 +1594,11 @@ refreshSession().then(() => {
   // lands people straight on the feed instead of the dashboard.
   if (new URLSearchParams(window.location.search).get('tab') === 'discover') {
     switchView('discover');
+  } else if (session.logged_in) {
+    // Dashboard is the default active view in the HTML itself (no nav
+    // click fires switchView('dashboard') to trigger its data load), so
+    // it needs an explicit render here once the session/account info is
+    // actually available.
+    renderDashboard();
   }
 });
