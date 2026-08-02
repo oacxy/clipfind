@@ -390,8 +390,21 @@ def cut_youtube_clip(
     # clipfind.get_cookiefile_path for how these get set up. YouTube's
     # "Sign in to confirm you're not a bot" wall increasingly needs this
     # alongside the proxy, not just IP-masking on its own.
-    cookiefile = get_cookiefile_path()
-    if cookiefile:
+    #
+    # yt-dlp doesn't just READ this file — it writes updated cookies back
+    # to the same path when it's done (same idea as curl's cookie-jar
+    # file). Render mounts Secret Files read-only, so pointing yt-dlp
+    # directly at /etc/secrets/youtube_cookies.txt fails with "Read-only
+    # file system" the moment it tries to save back (confirmed live).
+    # Copying it into this request's own scratch workdir first gives
+    # yt-dlp a writable copy — it gets thrown away with the rest of
+    # workdir when the cut finishes, and the next request just re-copies
+    # fresh from the real (read-only) source, so nothing is lost.
+    source_cookiefile = get_cookiefile_path()
+    cookiefile = None
+    if source_cookiefile:
+        cookiefile = os.path.join(workdir, "cookies.txt")
+        shutil.copyfile(source_cookiefile, cookiefile)
         ydl_opts["cookiefile"] = cookiefile
 
     # Same fresh-connection-per-retry approach as the transcript fetch in
