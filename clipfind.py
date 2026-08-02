@@ -220,9 +220,36 @@ def merge_fragments(entries: list, max_words: int = 20, max_gap: float = 2.0) ->
     return lines
 
 
+def get_cookiefile_path() -> Optional[str]:
+    """YouTube's stricter bot-detection ("Sign in to confirm you're not a
+    bot", and the related /sorry/ CAPTCHA-wall on transcript fetches)
+    increasingly needs real, logged-in-session cookies presented
+    alongside a proxy — IP-masking alone stopped being reliably enough on
+    its own. Export cookies.txt (Netscape format) from a real browser
+    logged into YouTube (e.g. the "Get cookies.txt LOCALLY" extension),
+    then either:
+      - upload it as a Render "Secret File" (Render writes those to
+        /etc/secrets/<filename> in the container), or
+      - set YOUTUBE_COOKIES_PATH to wherever it actually lives.
+    Returns None if neither is present, in which case everything falls
+    back to proxy-only behavior exactly as before — this is additive,
+    not required."""
+    import os
+
+    explicit = os.environ.get("YOUTUBE_COOKIES_PATH")
+    if explicit and os.path.exists(explicit):
+        return explicit
+    default_secret_path = "/etc/secrets/youtube_cookies.txt"
+    if os.path.exists(default_secret_path):
+        return default_secret_path
+    return None
+
+
 def _build_transcript_api():
     """Build a YouTubeTranscriptApi instance, routed through a Webshare
-    residential proxy if credentials are set in the environment.
+    residential proxy if credentials are set in the environment, and
+    carrying real YouTube session cookies if a cookies file is
+    configured (see get_cookiefile_path).
 
     YouTube blocks most cloud-provider IPs (Render, AWS, GCP, Azure, etc.)
     outright with RequestBlocked/IpBlocked errors — this isn't a bug in
@@ -241,17 +268,38 @@ def _build_transcript_api():
     username = os.environ.get("WEBSHARE_PROXY_USERNAME")
     password = os.environ.get("WEBSHARE_PROXY_PASSWORD")
 
+    http_client = None
+    cookiefile = get_cookiefile_path()
+    if cookiefile:
+        import http.cookiejar
+        import requests
+
+        jar = http.cookiejar.MozillaCookieJar(cookiefile)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            http_client = requests.Session()
+            http_client.cookies = jar
+        except Exception:
+            # A malformed/expired cookies file shouldn't take down
+            # transcript fetching entirely — fall back to no cookies
+            # (proxy-only), same as if none were configured.
+            http_client = None
+
+    proxy_config = None
     if username and password:
         from youtube_transcript_api.proxies import WebshareProxyConfig
 
-        return YouTubeTranscriptApi(
-            proxy_config=WebshareProxyConfig(
-                proxy_username=username,
-                proxy_password=password,
-            )
+        proxy_config = WebshareProxyConfig(
+            proxy_username=username,
+            proxy_password=password,
         )
 
-    return YouTubeTranscriptApi()
+    kwargs = {}
+    if proxy_config is not None:
+        kwargs["proxy_config"] = proxy_config
+    if http_client is not None:
+        kwargs["http_client"] = http_client
+    return YouTubeTranscriptApi(**kwargs)
 
 
 def _is_transient_proxy_error(msg: str) -> bool:
