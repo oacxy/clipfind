@@ -41,7 +41,7 @@ from llm_scorer import score_with_llm
 from focus_mode import find_moments_with_llm
 from export_copy import generate_export_copy
 from discover import build_discover_feed
-from digest import send_digest_emails, generate_unsubscribe_token, verify_unsubscribe_token
+from digest import send_digest_emails, generate_unsubscribe_token, verify_unsubscribe_token, send_email
 from captions import build_ass_subtitle, chunk_captions_for_clip, STYLE_PRESETS, DEFAULT_STYLE
 
 from clipfind import (
@@ -61,6 +61,7 @@ from models import (
     DiscoverFeed,
     SavedClip,
     Project,
+    AlertLog,
     FREE_DAILY_LIMIT,
     PAID_MAX_CLIP_SECONDS,
     REFERRAL_BONUS_PER_SIGNUP,
@@ -203,6 +204,67 @@ DIGEST_FROM_EMAIL = os.environ.get("DIGEST_FROM_EMAIL", "ClipFind <onboarding@re
 # Shared secret the external cron pinger has to send so randoms on the
 # internet can't trigger mass emails by hitting the endpoint themselves.
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
+
+# --- Ops alerts -------------------------------------------------------
+# YouTube session cookies expire (weeks to months, no warning) and when
+# they do, every real-video cut silently starts failing with the same
+# "bot-detection is still blocking downloads even with cookies configured"
+# error — see cut_youtube_clip's expired-cookies branch below. Without
+# this, the only way to notice is a user complaint or manually checking
+# Render logs. Reuses the same Resend account/sender the digest emails
+# already use, so no new secret needs setting up if digest is configured.
+COOKIE_ALERT_EMAIL = os.environ.get("COOKIE_ALERT_EMAIL", "clip.finders@gmail.com")
+# Once cookies expire, EVERY cut attempt hits this branch — without a
+# cooldown that's one email per cut, potentially dozens per hour. 6 hours
+# is fast enough to notice same-day without spamming an inbox.
+COOKIE_ALERT_COOLDOWN_HOURS = 6
+
+
+def _maybe_send_cookie_expiry_alert(detail: str) -> None:
+    """Best-effort ops alert — wrapped so a broken email send (bad/missing
+    RESEND_API_KEY, Resend outage, etc.) can never turn into a 500 for the
+    user who's just trying to cut a clip. The cooldown check + the actual
+    send both happen inside the try: a DB hiccup here shouldn't break
+    cutting either."""
+    try:
+        if not RESEND_API_KEY:
+            print("[COOKIE_ALERT] skipped — RESEND_API_KEY not configured", flush=True)
+            return
+        cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=COOKIE_ALERT_COOLDOWN_HOURS)
+        row = AlertLog.query.filter_by(key="cookie_expiry").first()
+        if row and row.last_sent_at > cutoff:
+            return  # already alerted recently, stay quiet
+        html = f"""
+        <div style="font-family:sans-serif;max-width:520px;">
+          <h2 style="color:#111;">ClipFind: YouTube cookies appear to have expired</h2>
+          <p>Video downloads are failing YouTube's bot-detection wall even though
+          cookies are configured — this almost always means the exported
+          <code>cookies.txt</code> session has expired and needs re-exporting from a
+          logged-in YouTube session.</p>
+          <p style="color:#555;font-size:13px;">Detail from the server: {detail}</p>
+          <p>Steps: export a fresh <code>cookies.txt</code> from a logged-in YouTube
+          session (see DEPLOY.md, "YouTube cookies" section), then update the
+          Render Secret File (or the path pointed to by YOUTUBE_COOKIES_PATH)
+          with the new contents.</p>
+          <p style="color:#999;font-size:12px;">You won't get another one of these for
+          {COOKIE_ALERT_COOLDOWN_HOURS} hours even if this keeps failing.</p>
+        </div>
+        """
+        send_email(
+            to_email=COOKIE_ALERT_EMAIL,
+            subject="ClipFind: YouTube cookies appear to have expired",
+            html=html,
+            api_key=RESEND_API_KEY,
+            from_email=DIGEST_FROM_EMAIL,
+        )
+        if row:
+            row.last_sent_at = datetime.datetime.utcnow()
+        else:
+            db.session.add(AlertLog(key="cookie_expiry", last_sent_at=datetime.datetime.utcnow()))
+        db.session.commit()
+        print(f"[COOKIE_ALERT] sent to {COOKIE_ALERT_EMAIL}", flush=True)
+    except Exception as e:
+        print(f"[COOKIE_ALERT] failed to send: {type(e).__name__}: {e}", flush=True)
 
 
 def clips_to_json(clips):
@@ -437,6 +499,11 @@ def cut_youtube_clip(
                 # likely the exported cookies file has expired (YouTube
                 # session cookies don't last forever) and needs
                 # re-exporting from a real logged-in browser session.
+                # This is a high-confidence signal (not just "blocked",
+                # but "blocked despite cookies being present"), so it's
+                # the one spot that triggers the ops email — see
+                # _maybe_send_cookie_expiry_alert above.
+                _maybe_send_cookie_expiry_alert(msg[-300:])
                 raise RuntimeError(
                     "YouTube's bot-detection is still blocking downloads even with cookies "
                     "configured — the cookies file has likely expired. Re-export cookies.txt "

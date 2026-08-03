@@ -192,3 +192,19 @@ class DiscoverFeed(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     computed_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
     feed_json = db.Column(db.Text, nullable=False)  # JSON-encoded list of picks
+
+
+class AlertLog(db.Model):
+    """Tracks the last time each one-off ops alert (e.g. "YouTube cookies
+    expired") was sent, so a persistently-broken feature emails once and
+    then stays quiet for a cooldown window instead of firing on every
+    single request that hits the same failure. A DB row (not an in-memory
+    variable) on purpose — gunicorn restarts on every deploy and after any
+    crash, which would otherwise reset an in-memory cooldown constantly and
+    let the spam back in right when things are already broken."""
+
+    __tablename__ = "alert_log"
+
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    last_sent_at = db.Column(db.DateTime, nullable=False)
