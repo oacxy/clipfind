@@ -24,6 +24,7 @@ import datetime
 import functools
 import subprocess
 import tempfile
+import threading
 import concurrent.futures
 from typing import Optional, Dict
 
@@ -43,6 +44,10 @@ from export_copy import generate_export_copy
 from discover import build_discover_feed
 from digest import send_digest_emails, generate_unsubscribe_token, verify_unsubscribe_token, send_email
 from captions import build_ass_subtitle, chunk_captions_for_clip, STYLE_PRESETS, DEFAULT_STYLE
+from story_studio import generate_story, analyze_story, GENRES, ANALYST_METRICS
+from footage_library import download_footage, list_footage, FOOTAGE_CATEGORIES, FOOTAGE_CATEGORY_KEYS
+from azure_tts import narrate_story, is_configured as tts_is_configured, VOICES, DEFAULT_VOICE, VOICE_KEYS
+from video_assembly import assemble_story_video, STORY_VIDEO_DIR
 
 from clipfind import (
     fetch_youtube_transcript,
@@ -62,6 +67,8 @@ from models import (
     SavedClip,
     Project,
     AlertLog,
+    StoryProject,
+    BackgroundFootage,
     FREE_DAILY_LIMIT,
     PAID_MAX_CLIP_SECONDS,
     REFERRAL_BONUS_PER_SIGNUP,
@@ -159,10 +166,43 @@ def _ensure_referral_columns():
         print(f"[MIGRATION] backfilled referral_code for {len(users_missing_code)} existing user(s)", flush=True)
 
 
+def _ensure_story_video_columns():
+    """story_projects might be a table db.create_all() just created fresh
+    (with every current column already present — nothing to do here), or
+    it might already exist from an earlier deploy of Story Studio before
+    the video pipeline's columns were added (needs real ALTER TABLEs).
+    Guarded to be a safe no-op either way, same pattern as
+    _ensure_referral_columns above."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(db.engine)
+    if "story_projects" not in inspector.get_table_names():
+        return
+    existing_cols = {c["name"] for c in inspector.get_columns("story_projects")}
+    statements = []
+    if "video_status" not in existing_cols:
+        statements.append("ALTER TABLE story_projects ADD COLUMN video_status VARCHAR(20) NOT NULL DEFAULT 'none'")
+    if "video_path" not in existing_cols:
+        statements.append("ALTER TABLE story_projects ADD COLUMN video_path VARCHAR(500)")
+    if "video_error" not in existing_cols:
+        statements.append("ALTER TABLE story_projects ADD COLUMN video_error TEXT")
+    if "voice" not in existing_cols:
+        statements.append("ALTER TABLE story_projects ADD COLUMN voice VARCHAR(50)")
+    if "footage_category" not in existing_cols:
+        statements.append("ALTER TABLE story_projects ADD COLUMN footage_category VARCHAR(50)")
+    if statements:
+        with db.engine.connect() as conn:
+            for stmt in statements:
+                conn.execute(text(stmt))
+            conn.commit()
+        print(f"[MIGRATION] added {len(statements)} video-pipeline column(s) to story_projects", flush=True)
+
+
 with app.app_context():
     db.create_all()
     _ensure_email_opt_in_column()
     _ensure_referral_columns()
+    _ensure_story_video_columns()
 
 # --- Auth ---------------------------------------------------------------
 login_manager = LoginManager()
@@ -1344,6 +1384,395 @@ def generate_clip_export_copy(clip_id):
     db.session.commit()
 
     return jsonify({"clip": saved_clip_to_json(clip)})
+
+
+# --- Story Studio -----------------------------------------------------
+# AI-generated (or user-submitted) short-form stories with a Story
+# Analyst breakdown, the story-side counterpart to Clip Finder's
+# clip-scoring. Gated to paid accounts outright (rather than metered like
+# /api/analyze's free daily limit) since every generate/analyze call is a
+# real LLM cost and this is a net-new premium feature, not the core
+# product free users are already used to getting a taste of. Revisit this
+# gate later if it turns out free-tier access would help conversion more
+# than it costs.
+
+def story_project_to_json(p: StoryProject) -> dict:
+    try:
+        sub_scores = json.loads(p.sub_scores_json)
+    except (ValueError, TypeError):
+        sub_scores = {}
+    return {
+        "id": p.id,
+        "title": p.title,
+        "body": p.body,
+        "genre": p.genre,
+        "source": p.source,
+        "overall_score": p.overall_score,
+        "sub_scores": sub_scores,
+        "estimated_watch_time_seconds": p.estimated_watch_time_seconds,
+        "reasoning": p.reasoning,
+        "created_at": p.created_at.isoformat(),
+        "video_status": p.video_status,
+        "video_error": p.video_error,
+        "video_url": f"/story-videos/{os.path.basename(p.video_path)}" if p.video_path else None,
+        "voice": p.voice,
+        "footage_category": p.footage_category,
+    }
+
+
+def _save_story_project(story, source: str) -> StoryProject:
+    project = StoryProject(
+        user_id=current_user.id,
+        title=story.title,
+        body=story.body,
+        genre=story.genre,
+        source=source,
+        overall_score=story.analysis.overall_score,
+        sub_scores_json=json.dumps(story.analysis.sub_scores),
+        estimated_watch_time_seconds=story.analysis.estimated_watch_time_seconds,
+        reasoning=story.analysis.reasoning,
+    )
+    db.session.add(project)
+    db.session.commit()
+    return project
+
+
+@app.route("/api/story-studio/genres", methods=["GET"])
+@json_login_required
+def story_studio_genres():
+    return jsonify({"genres": GENRES, "metrics": list(ANALYST_METRICS)})
+
+
+@app.route("/api/story-studio/generate", methods=["POST"])
+@json_login_required
+def story_studio_generate():
+    if not current_user.is_paid:
+        return jsonify(
+            {"error": "Story Studio is available on the paid plan.", "upgrade_required": True}
+        ), 402
+
+    data = request.get_json(silent=True) or {}
+    genre = (data.get("genre") or "").strip()
+    if genre not in GENRES:
+        return jsonify({"error": f"Pick a genre from: {', '.join(GENRES)}."}), 400
+
+    try:
+        story = generate_story(genre)
+    except Exception as e:
+        import traceback
+        print(f"[STORY_GENERATE_FAILED] genre={genre!r} {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        return jsonify({"error": "Couldn't generate a story right now — try again in a moment."}), 502
+
+    project = _save_story_project(story, source="generated")
+    return jsonify({"story": story_project_to_json(project)})
+
+
+@app.route("/api/story-studio/analyze", methods=["POST"])
+@json_login_required
+def story_studio_analyze():
+    if not current_user.is_paid:
+        return jsonify(
+            {"error": "Story Studio is available on the paid plan.", "upgrade_required": True}
+        ), 402
+
+    data = request.get_json(silent=True) or {}
+    story_text = (data.get("story_text") or "").strip()
+    if not story_text:
+        return jsonify({"error": "Paste a story first."}), 400
+
+    try:
+        story = analyze_story(story_text)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        import traceback
+        print(f"[STORY_ANALYZE_FAILED] {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        return jsonify({"error": "Couldn't analyze that story right now — try again in a moment."}), 502
+
+    project = _save_story_project(story, source="user_submitted")
+    return jsonify({"story": story_project_to_json(project)})
+
+
+@app.route("/api/story-studio/projects", methods=["GET"])
+@json_login_required
+def list_story_projects():
+    projects = (
+        StoryProject.query.filter_by(user_id=current_user.id)
+        .order_by(StoryProject.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return jsonify({"stories": [story_project_to_json(p) for p in projects]})
+
+
+@app.route("/api/story-studio/projects/<int:project_id>", methods=["GET"])
+@json_login_required
+def get_story_project(project_id):
+    p = StoryProject.query.filter_by(id=project_id, user_id=current_user.id).first()
+    if not p:
+        return jsonify({"error": "That story wasn't found."}), 404
+    return jsonify({"story": story_project_to_json(p)})
+
+
+@app.route("/api/story-studio/projects/<int:project_id>", methods=["DELETE"])
+@json_login_required
+def delete_story_project(project_id):
+    p = StoryProject.query.filter_by(id=project_id, user_id=current_user.id).first()
+    if not p:
+        return jsonify({"error": "That story wasn't found."}), 404
+    db.session.delete(p)
+    db.session.commit()
+    return jsonify({"deleted": True})
+
+
+@app.route("/api/story-studio/footage-categories", methods=["GET"])
+@json_login_required
+def story_studio_footage_categories():
+    # Read-only + cheap, so this stays login-required rather than
+    # secret-gated like the actual download/admin routes below — just
+    # lets the frontend populate a category dropdown.
+    counts = {}
+    for item in list_footage():
+        counts[item["category"]] = counts.get(item["category"], 0) + 1
+    return jsonify(
+        {
+            "categories": [
+                {**c, "footage_count": counts.get(c["key"], 0)} for c in FOOTAGE_CATEGORIES
+            ]
+        }
+    )
+
+
+@app.route("/api/admin/footage/download", methods=["POST"])
+def admin_download_footage():
+    """Curating the shared background-footage library is an ops action
+    (done once by whoever runs the app, reused by every user's stories),
+    not something individual users trigger — a public user-facing
+    endpoint here would mean anyone could rack up Webshare bandwidth and
+    server CPU on demand. Secret-gated the same way the cron endpoints
+    are, since both are "trusted caller, not a signed-in user" actions."""
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET is not configured on this server."}), 500
+    if request.args.get("secret") != CRON_SECRET:
+        return jsonify({"error": "Forbidden."}), 403
+
+    data = request.get_json(silent=True) or {}
+    youtube_url = (data.get("youtube_url") or "").strip()
+    category = (data.get("category") or "").strip()
+    max_minutes = data.get("max_minutes", 15)
+    if not youtube_url:
+        return jsonify({"error": "Need youtube_url."}), 400
+    if category not in FOOTAGE_CATEGORY_KEYS:
+        return jsonify({"error": f"category must be one of: {', '.join(sorted(FOOTAGE_CATEGORY_KEYS))}."}), 400
+    try:
+        max_minutes = max(1, min(int(max_minutes), 30))
+    except (ValueError, TypeError):
+        max_minutes = 15
+
+    try:
+        meta = download_footage(youtube_url, category, max_minutes=max_minutes)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+
+    row = BackgroundFootage(
+        id=meta["id"],
+        category=meta["category"],
+        source_url=meta["source_url"],
+        title=meta["title"],
+        file_path=meta["file_path"],
+        duration_seconds=meta["duration_seconds"],
+        downloaded_at=meta["downloaded_at"],
+    )
+    db.session.add(row)
+    db.session.commit()
+
+    return jsonify(
+        {
+            "id": row.id,
+            "category": row.category,
+            "title": row.title,
+            "duration_seconds": row.duration_seconds,
+        }
+    )
+
+
+@app.route("/api/admin/footage", methods=["GET"])
+def admin_list_footage():
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET is not configured on this server."}), 500
+    if request.args.get("secret") != CRON_SECRET:
+        return jsonify({"error": "Forbidden."}), 403
+
+    rows = BackgroundFootage.query.order_by(BackgroundFootage.downloaded_at.desc()).all()
+    return jsonify(
+        {
+            "footage": [
+                {
+                    "id": r.id,
+                    "category": r.category,
+                    "title": r.title,
+                    "source_url": r.source_url,
+                    "duration_seconds": r.duration_seconds,
+                    "times_used": r.times_used,
+                    "downloaded_at": r.downloaded_at.isoformat(),
+                }
+                for r in rows
+            ]
+        }
+    )
+
+
+@app.route("/api/story-studio/voices", methods=["GET"])
+@json_login_required
+def story_studio_voices():
+    return jsonify({"voices": VOICES, "tts_configured": tts_is_configured()})
+
+
+# One video-assembly job at a time, server-wide — not per-user. This app
+# runs as a single gunicorn worker (see the OOM history earlier: Discover
+# refresh alone was enough to take the whole instance down), and each
+# job here is a real TTS network call plus an ffmpeg encode. Running the
+# work on a background thread (rather than blocking the request) already
+# keeps the app responsive to OTHER requests while a video assembles —
+# this lock is the next layer: it stops two heavy jobs from stacking up
+# and fighting over the same limited RAM/CPU at once. A real job queue
+# (Celery/RQ + Redis) would be the eventual right answer if usage grows
+# past what one-at-a-time can keep up with.
+_STORY_VIDEO_LOCK = threading.Lock()
+
+
+def _run_story_video_job(flask_app, story_id: int, footage_row_id: str, voice: str) -> None:
+    """Runs on a background daemon thread, kicked off (and immediately
+    returned from) by /generate-video below. Needs its own app context
+    since it's not running inside a request anymore — that's also why
+    this takes the Flask app object explicitly rather than closing over
+    the global, to keep the dependency obvious at the call site."""
+    try:
+        with flask_app.app_context():
+            story = db.session.get(StoryProject, story_id)
+            if not story:
+                return  # project got deleted while this was queued/running
+            try:
+                audio_path, word_timings = narrate_story(story.body, voice=voice)
+
+                footage = db.session.get(BackgroundFootage, footage_row_id)
+                if not footage or not os.path.exists(footage.file_path):
+                    raise RuntimeError(
+                        "The background footage selected for this video is no longer available."
+                    )
+
+                out_path = assemble_story_video(
+                    footage.file_path,
+                    audio_path,
+                    captions=True,
+                    word_timings=word_timings,
+                )
+
+                story.video_status = "ready"
+                story.video_path = out_path
+                story.video_error = None
+                footage.times_used = (footage.times_used or 0) + 1
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"[STORY_VIDEO_FAILED] story_id={story_id} {type(e).__name__}: {e}", flush=True)
+                # Re-fetch after rollback — the in-memory `story` object's
+                # pending changes were just discarded along with everything
+                # else in the failed transaction.
+                story2 = db.session.get(StoryProject, story_id)
+                if story2:
+                    story2.video_status = "failed"
+                    story2.video_error = str(e)[:500]
+                    db.session.commit()
+    finally:
+        _STORY_VIDEO_LOCK.release()
+
+
+@app.route("/api/story-studio/projects/<int:project_id>/generate-video", methods=["POST"])
+@json_login_required
+def story_studio_generate_video(project_id):
+    if not current_user.is_paid:
+        return jsonify(
+            {"error": "Story Studio video generation is available on the paid plan.", "upgrade_required": True}
+        ), 402
+
+    story = StoryProject.query.filter_by(id=project_id, user_id=current_user.id).first()
+    if not story:
+        return jsonify({"error": "That story wasn't found."}), 404
+    if story.video_status == "processing":
+        return jsonify({"error": "A video is already being generated for this story."}), 409
+    if not tts_is_configured():
+        return jsonify({"error": "Voice narration isn't configured on this server yet."}), 502
+
+    data = request.get_json(silent=True) or {}
+    voice = data.get("voice") or DEFAULT_VOICE
+    if voice not in VOICE_KEYS:
+        voice = DEFAULT_VOICE
+    footage_category = (data.get("footage_category") or "").strip()
+    if footage_category not in FOOTAGE_CATEGORY_KEYS:
+        return jsonify({"error": f"Pick a footage category from: {', '.join(sorted(FOOTAGE_CATEGORY_KEYS))}."}), 400
+
+    # Smart Pairing (basic version): least-used clip in the category, not
+    # a pure-random pick, so the same background loop doesn't show up in
+    # every story back-to-back once there's more than one option to
+    # choose from per category.
+    footage = (
+        BackgroundFootage.query.filter_by(category=footage_category)
+        .order_by(BackgroundFootage.times_used.asc(), BackgroundFootage.downloaded_at.asc())
+        .first()
+    )
+    if not footage:
+        return jsonify(
+            {"error": f"No background footage has been downloaded for '{footage_category}' yet."}
+        ), 400
+
+    if not _STORY_VIDEO_LOCK.acquire(blocking=False):
+        return jsonify(
+            {"error": "Another video is already being generated on this server — try again in a minute."}
+        ), 429
+
+    story.video_status = "processing"
+    story.video_error = None
+    story.voice = voice
+    story.footage_category = footage_category
+    db.session.commit()
+
+    thread = threading.Thread(
+        target=_run_story_video_job,
+        args=(app, story.id, footage.id, voice),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"status": "processing"})
+
+
+@app.route("/api/story-studio/projects/<int:project_id>/video-status", methods=["GET"])
+@json_login_required
+def story_studio_video_status(project_id):
+    story = StoryProject.query.filter_by(id=project_id, user_id=current_user.id).first()
+    if not story:
+        return jsonify({"error": "That story wasn't found."}), 404
+    video_url = f"/story-videos/{os.path.basename(story.video_path)}" if story.video_path else None
+    return jsonify(
+        {
+            "status": story.video_status,
+            "error": story.video_error,
+            "video_url": video_url,
+            "voice": story.voice,
+            "footage_category": story.footage_category,
+        }
+    )
+
+
+@app.route("/story-videos/<path:filename>")
+def serve_story_video(filename):
+    # Same unauthenticated-but-unguessable-filename model as /clips/<filename>
+    # — the uuid-based filename isn't practically guessable, consistent
+    # with how the rest of this app already serves generated video.
+    return send_from_directory(STORY_VIDEO_DIR, filename, mimetype="video/mp4", as_attachment=False)
 
 
 @app.route("/api/cron/refresh-discover", methods=["GET", "POST"])

@@ -85,6 +85,18 @@ const exportsStatus = document.getElementById('exportsStatus');
 const exportsList = document.getElementById('exportsList');
 const refreshExportsBtn = document.getElementById('refreshExportsBtn');
 
+const storyModeTabs = document.getElementById('storyModeTabs');
+const storyGenerateMode = document.getElementById('storyGenerateMode');
+const storyAnalyzeMode = document.getElementById('storyAnalyzeMode');
+const storyGenreChips = document.getElementById('storyGenreChips');
+const storyGenerateBtn = document.getElementById('storyGenerateBtn');
+const storyTextInput = document.getElementById('storyTextInput');
+const storyAnalyzeBtn = document.getElementById('storyAnalyzeBtn');
+const storyStatus = document.getElementById('storyStatus');
+const storyResult = document.getElementById('storyResult');
+const storyProjectsList = document.getElementById('storyProjectsList');
+const refreshStoriesBtn = document.getElementById('refreshStoriesBtn');
+
 const dashUserName = document.getElementById('dashUserName');
 const dashNewProjectBtn = document.getElementById('dashNewProjectBtn');
 const dashUrlInput = document.getElementById('dashUrlInput');
@@ -112,6 +124,12 @@ let manualSelEnd = 30;
 let manualDragHandle = null; // 'start' | 'end' | null — which handle is being dragged, if any
 let projectListCache = [];
 let projectListFetchedOnce = false;
+let storyStudioLoaded = false; // genres fetched once per page load
+let storyGenres = [];
+let selectedStoryGenre = null;
+let storyMode = 'generate'; // 'generate' | 'analyze' — which input panel is showing
+let storyProjectsCache = [];
+let storyProjectsFetchedOnce = false;
 // Captured once at page load — someone arriving via clipfind.com/?ref=CODE
 // (or /app?ref=CODE directly) should still get attributed even if they
 // poke around before actually signing up.
@@ -147,6 +165,14 @@ const LOADING_MESSAGES = {
     'Downloading the clip…',
     'Cropping and styling…',
     'Burning in captions…',
+  ],
+  storyGenerate: [
+    'Writing the story…',
+    'Scoring it as a Story Analyst would…',
+  ],
+  storyAnalyze: [
+    'Reading through your story…',
+    'Scoring it as a Story Analyst would…',
   ],
 };
 
@@ -212,6 +238,9 @@ function switchView(view) {
   }
   if (view === 'exports') {
     loadExportsView(false);
+  }
+  if (view === 'storystudio' && !storyStudioLoaded) {
+    loadStoryStudio();
   }
   if (view === 'projects') {
     // Sidebar "Projects" always lands on the project list, even if a
@@ -896,6 +925,17 @@ const SUB_SCORE_LABELS = {
   emotional_impact: 'Emotional Impact',
   pacing: 'Pacing',
   originality: 'Originality',
+  // Story Analyst metrics (story_studio.ANALYST_METRICS) — virality and
+  // emotional_impact above are already shared with the clip Analyst, so
+  // only the story-specific ones need adding here.
+  hook_strength: 'Hook Strength',
+  suspense: 'Suspense',
+  curiosity: 'Curiosity',
+  payoff_quality: 'Payoff Quality',
+  story_flow: 'Story Flow',
+  replay_potential: 'Replay Potential',
+  completion_prediction: 'Completion Prediction',
+  difficulty_to_adapt: 'Difficulty to Adapt',
 };
 
 function renderAnalystBreakdown(subScores, suggestions) {
@@ -1834,6 +1874,396 @@ analyzeBtn.addEventListener('click', () => {
 });
 
 demoBtn.addEventListener('click', () => run('/api/demo'));
+
+// ---------------------------------------------------------------------
+// Story Studio
+// ---------------------------------------------------------------------
+// Generate-vs-analyze mode toggle reuses the same .preset-chip look as
+// the Focus Mode presets — no new chip styling needed, just different
+// data attributes and two panels swapped by display:none.
+storyModeTabs.querySelectorAll('.preset-chip').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    storyMode = tab.dataset.mode;
+    storyModeTabs.querySelectorAll('.preset-chip').forEach((t) => t.classList.toggle('active', t === tab));
+    storyGenerateMode.style.display = storyMode === 'generate' ? 'block' : 'none';
+    storyAnalyzeMode.style.display = storyMode === 'analyze' ? 'block' : 'none';
+    storyStatus.className = 'status';
+    storyStatus.textContent = '';
+  });
+});
+
+function renderStoryGenreChips() {
+  if (!selectedStoryGenre && storyGenres.length) selectedStoryGenre = storyGenres[0];
+  storyGenreChips.innerHTML = storyGenres
+    .map((g) => `<button type="button" class="preset-chip${g === selectedStoryGenre ? ' active' : ''}" data-genre="${g}">${g}</button>`)
+    .join('');
+  storyGenreChips.querySelectorAll('.preset-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      selectedStoryGenre = chip.dataset.genre;
+      renderStoryGenreChips();
+    });
+  });
+}
+
+let storyVoicesCache = [];
+let storyVoicesFetchedOnce = false;
+let storyTtsConfigured = false;
+let storyFootageCategoriesCache = [];
+let storyFootageCategoriesFetchedOnce = false;
+let activeStoryVideoPoll = null; // setInterval id — only one story's status should ever be polling at once
+
+async function loadStoryStudio() {
+  storyStudioLoaded = true;
+  try {
+    const res = await fetch('/api/story-studio/genres');
+    const data = await res.json();
+    if (res.ok) {
+      storyGenres = data.genres || [];
+      renderStoryGenreChips();
+    }
+  } catch (e) {
+    // Non-fatal — genre chips just stay empty, Generate will fail with a
+    // clear "pick a genre" message rather than silently doing nothing.
+  }
+  loadStoryProjects(false);
+}
+
+async function loadStoryVoicesAndCategories() {
+  if (!storyVoicesFetchedOnce) {
+    try {
+      const res = await fetch('/api/story-studio/voices');
+      const data = await res.json();
+      if (res.ok) {
+        storyVoicesCache = data.voices || [];
+        storyTtsConfigured = !!data.tts_configured;
+      }
+    } catch (e) {
+      // silent — the video section just shows "no voices available"
+    }
+    storyVoicesFetchedOnce = true;
+  }
+  if (!storyFootageCategoriesFetchedOnce) {
+    try {
+      const res = await fetch('/api/story-studio/footage-categories');
+      const data = await res.json();
+      if (res.ok) storyFootageCategoriesCache = data.categories || [];
+    } catch (e) {
+      // silent, same reasoning
+    }
+    storyFootageCategoriesFetchedOnce = true;
+  }
+}
+
+function stopStoryVideoPoll() {
+  if (activeStoryVideoPoll) {
+    clearInterval(activeStoryVideoPoll);
+    activeStoryVideoPoll = null;
+  }
+}
+
+function pollStoryVideoStatus(storyId, statusEl, playerWrapEl, generateBtn) {
+  stopStoryVideoPoll(); // only one story's video should ever be polling — switching stories replaces it
+  activeStoryVideoPoll = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/story-studio/projects/${storyId}/video-status`);
+      const data = await res.json();
+      if (!res.ok) return; // transient — next tick retries rather than giving up on one bad response
+      if (data.status === 'processing') {
+        statusEl.className = 'status';
+        statusEl.textContent = 'Generating narration and assembling the video — this can take a minute or two…';
+        return;
+      }
+      stopStoryVideoPoll();
+      generateBtn.disabled = false;
+      if (data.status === 'ready') {
+        statusEl.className = 'status';
+        statusEl.textContent = 'Video ready.';
+        playerWrapEl.innerHTML = `<video controls preload="metadata" src="${data.video_url}"></video>`;
+        // Keep the saved-stories cache in sync so navigating away and back
+        // (which re-renders from this cache) shows the finished video
+        // instead of a stale "not generated yet" state.
+        const cached = storyProjectsCache.find((s) => s.id === storyId);
+        if (cached) {
+          cached.video_status = 'ready';
+          cached.video_url = data.video_url;
+        }
+      } else if (data.status === 'failed') {
+        statusEl.className = 'status error';
+        statusEl.textContent = data.error || 'Video generation failed.';
+        const cached = storyProjectsCache.find((s) => s.id === storyId);
+        if (cached) {
+          cached.video_status = 'failed';
+          cached.video_error = data.error;
+        }
+      }
+    } catch (e) {
+      // transient network hiccup — next tick retries
+    }
+  }, 3000);
+}
+
+function renderStoryVideoSectionHtml(story) {
+  const voiceOptions = storyVoicesCache
+    .map((v) => `<option value="${v.key}"${v.key === story.voice ? ' selected' : ''}>${v.label}</option>`)
+    .join('');
+  const categoryOptions = storyFootageCategoriesCache
+    .map((c) => `<option value="${c.key}"${c.key === story.footage_category ? ' selected' : ''}>${c.label} (${c.footage_count} clip${c.footage_count === 1 ? '' : 's'})</option>`)
+    .join('');
+  return `
+    <div class="story-video-section">
+      <div class="story-video-controls">
+        <select id="storyVideoVoiceSelect">${voiceOptions || '<option value="">No voices available</option>'}</select>
+        <select id="storyVideoCategorySelect">${categoryOptions || '<option value="">No footage categories available</option>'}</select>
+        <button type="button" id="storyGenerateVideoBtn">Generate video</button>
+      </div>
+      <div class="status" id="storyVideoStatus"></div>
+      <div id="storyVideoPlayerWrap"></div>
+    </div>
+  `;
+}
+
+function wireStoryVideoSection(story) {
+  const voiceSelect = document.getElementById('storyVideoVoiceSelect');
+  const categorySelect = document.getElementById('storyVideoCategorySelect');
+  const generateBtn = document.getElementById('storyGenerateVideoBtn');
+  const statusEl = document.getElementById('storyVideoStatus');
+  const playerWrap = document.getElementById('storyVideoPlayerWrap');
+  if (!generateBtn) return;
+
+  if (!storyTtsConfigured) {
+    generateBtn.disabled = true;
+    statusEl.textContent = "Voice narration isn't configured on this server yet.";
+  } else if (!storyFootageCategoriesCache.length) {
+    generateBtn.disabled = true;
+    statusEl.textContent = 'No background footage categories are available yet.';
+  }
+
+  if (story.video_status === 'processing') {
+    generateBtn.disabled = true;
+    pollStoryVideoStatus(story.id, statusEl, playerWrap, generateBtn);
+  } else if (story.video_status === 'ready' && story.video_url) {
+    statusEl.className = 'status';
+    statusEl.textContent = 'Video ready.';
+    playerWrap.innerHTML = `<video controls preload="metadata" src="${story.video_url}"></video>`;
+  } else if (story.video_status === 'failed') {
+    statusEl.className = 'status error';
+    statusEl.textContent = story.video_error || 'Video generation failed.';
+  }
+
+  generateBtn.addEventListener('click', async () => {
+    generateBtn.disabled = true;
+    statusEl.className = 'status';
+    statusEl.textContent = 'Starting…';
+    playerWrap.innerHTML = '';
+    try {
+      const res = await fetch(`/api/story-studio/projects/${story.id}/generate-video`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voice: voiceSelect.value, footage_category: categorySelect.value }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        generateBtn.disabled = false;
+        statusEl.className = 'status error';
+        statusEl.textContent = data.error || 'Could not start video generation.';
+        if (data.upgrade_required) switchView('settings');
+        return;
+      }
+      pollStoryVideoStatus(story.id, statusEl, playerWrap, generateBtn);
+    } catch (e) {
+      generateBtn.disabled = false;
+      statusEl.className = 'status error';
+      statusEl.textContent = 'Network error starting video generation.';
+    }
+  });
+}
+
+async function renderStoryVideoSectionAsync(story) {
+  await loadStoryVoicesAndCategories();
+  const wrap = document.getElementById('storyVideoSectionWrap');
+  if (!wrap) return; // the user navigated to a different story before this resolved
+  wrap.innerHTML = renderStoryVideoSectionHtml(story);
+  wireStoryVideoSection(story);
+}
+
+function renderStoryResult(story) {
+  stopStoryVideoPoll(); // switching to a different story shouldn't keep polling the old one's status
+  const genreLabel = story.source === 'user_submitted' ? 'Your story' : story.genre;
+  storyResult.innerHTML = `
+    <div class="results">
+      <div class="clip">
+        <div class="meta">
+          <span>${genreLabel} · ${formatSeconds(story.estimated_watch_time_seconds)} watch time</span>
+          <span class="score">${story.overall_score}/100</span>
+        </div>
+        <div class="hook">${story.title}</div>
+        <div class="preview" style="white-space:pre-wrap;">${story.body}</div>
+        ${story.reasoning ? `<div class="reasoning">${story.reasoning}</div>` : ''}
+        ${renderAnalystBreakdown(story.sub_scores, [])}
+        <div id="storyVideoSectionWrap"></div>
+      </div>
+    </div>
+  `;
+  // Only stories that made it to the DB (generate/analyze always save one,
+  // and every entry in the saved-stories list obviously has one) can have
+  // a video generated against them — id is the only thing this depends on.
+  if (story.id) {
+    renderStoryVideoSectionAsync(story);
+  }
+}
+
+async function runStoryGenerate() {
+  if (!selectedStoryGenre) {
+    storyStatus.className = 'status error';
+    storyStatus.textContent = 'Pick a genre first.';
+    return;
+  }
+  storyStatus.className = 'status';
+  const stopLoading = showLoadingBar(storyStatus, LOADING_MESSAGES.storyGenerate);
+  storyResult.innerHTML = '';
+  storyGenerateBtn.disabled = true;
+  try {
+    const res = await fetch('/api/story-studio/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ genre: selectedStoryGenre }),
+    });
+    const data = await res.json();
+    stopLoading();
+    if (!res.ok) {
+      storyStatus.className = 'status error';
+      if (data.auth_required) {
+        storyStatus.textContent = 'Sign in first.';
+      } else if (data.upgrade_required) {
+        storyStatus.textContent = data.error;
+        switchView('settings');
+      } else {
+        storyStatus.textContent = data.error || 'Could not generate a story.';
+      }
+      return;
+    }
+    storyStatus.textContent = '';
+    renderStoryResult(data.story);
+    storyProjectsFetchedOnce = false;
+    loadStoryProjects(false);
+  } catch (e) {
+    stopLoading();
+    storyStatus.className = 'status error';
+    storyStatus.textContent = 'Network error while generating.';
+  } finally {
+    storyGenerateBtn.disabled = false;
+  }
+}
+storyGenerateBtn.addEventListener('click', runStoryGenerate);
+
+async function runStoryAnalyze() {
+  const text = storyTextInput.value.trim();
+  if (!text) {
+    storyStatus.className = 'status error';
+    storyStatus.textContent = 'Paste a story first.';
+    return;
+  }
+  storyStatus.className = 'status';
+  const stopLoading = showLoadingBar(storyStatus, LOADING_MESSAGES.storyAnalyze);
+  storyResult.innerHTML = '';
+  storyAnalyzeBtn.disabled = true;
+  try {
+    const res = await fetch('/api/story-studio/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ story_text: text }),
+    });
+    const data = await res.json();
+    stopLoading();
+    if (!res.ok) {
+      storyStatus.className = 'status error';
+      if (data.auth_required) {
+        storyStatus.textContent = 'Sign in first.';
+      } else if (data.upgrade_required) {
+        storyStatus.textContent = data.error;
+        switchView('settings');
+      } else {
+        storyStatus.textContent = data.error || 'Could not analyze that story.';
+      }
+      return;
+    }
+    storyStatus.textContent = '';
+    renderStoryResult(data.story);
+    storyProjectsFetchedOnce = false;
+    loadStoryProjects(false);
+  } catch (e) {
+    stopLoading();
+    storyStatus.className = 'status error';
+    storyStatus.textContent = 'Network error while analyzing.';
+  } finally {
+    storyAnalyzeBtn.disabled = false;
+  }
+}
+storyAnalyzeBtn.addEventListener('click', runStoryAnalyze);
+
+async function loadStoryProjects(force) {
+  if (storyProjectsFetchedOnce && !force) return;
+  try {
+    const res = await fetch('/api/story-studio/projects');
+    const data = await res.json();
+    if (!res.ok) return;
+    storyProjectsCache = data.stories || [];
+    storyProjectsFetchedOnce = true;
+    renderStoryProjectsList();
+  } catch (e) {
+    // Silent — this is a secondary "saved stories" list under the main
+    // generate/analyze flow, not worth a dedicated error UI of its own.
+  }
+}
+
+function renderStoryProjectsList() {
+  if (!storyProjectsCache.length) {
+    storyProjectsList.innerHTML = '<div style="color:var(--text-dimmer);font-size:0.85rem;">No saved stories yet — generate or analyze one above.</div>';
+    return;
+  }
+  storyProjectsList.innerHTML = storyProjectsCache.map((s) => `
+    <div class="clip">
+      <div class="meta">
+        <span>${s.source === 'user_submitted' ? 'Your story' : s.genre} · ${new Date(s.created_at).toLocaleDateString()}</span>
+        <span class="score">${s.overall_score}/100</span>
+      </div>
+      <div class="hook">${s.title}</div>
+      <div class="row" style="margin-top:10px;">
+        <button type="button" class="secondary" data-view-story="${s.id}">View</button>
+        <button type="button" class="secondary" data-delete-story="${s.id}">Delete</button>
+      </div>
+    </div>
+  `).join('');
+
+  storyProjectsList.querySelectorAll('[data-view-story]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const story = storyProjectsCache.find((s) => String(s.id) === btn.dataset.viewStory);
+      if (story) {
+        renderStoryResult(story);
+        storyStatus.className = 'status';
+        storyStatus.textContent = '';
+      }
+    });
+  });
+  storyProjectsList.querySelectorAll('[data-delete-story]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.deleteStory;
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/story-studio/projects/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+          storyProjectsCache = storyProjectsCache.filter((s) => String(s.id) !== id);
+          renderStoryProjectsList();
+        } else {
+          btn.disabled = false;
+        }
+      } catch (e) {
+        btn.disabled = false;
+      }
+    });
+  });
+}
+refreshStoriesBtn.addEventListener('click', () => loadStoryProjects(true));
 
 // ---------------------------------------------------------------------
 // Boot

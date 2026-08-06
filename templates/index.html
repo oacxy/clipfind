@@ -42,7 +42,7 @@
     </div>
 
     <div class="nav-group">
-      <button class="nav-item" data-view="storystudio"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c.7 2.2-1.8 3-1.8 5.2a1.8 1.8 0 0 0 3.6 0c0-.7-.3-1.2-.3-1.2 1 .6 1.8 1.8 1.8 3.1A3.3 3.3 0 0 1 12 14a3.3 3.3 0 0 1-3.3-3.3C8.7 7.8 10.9 6 12 3.5z"/><path d="M6 15.5h12M7.5 18.5h9M9 21.5h6"/></svg></span> Story Studio <span class="soon-badge">soon</span></button>
+      <button class="nav-item" data-view="storystudio"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c.7 2.2-1.8 3-1.8 5.2a1.8 1.8 0 0 0 3.6 0c0-.7-.3-1.2-.3-1.2 1 .6 1.8 1.8 1.8 3.1A3.3 3.3 0 0 1 12 14a3.3 3.3 0 0 1-3.3-3.3C8.7 7.8 10.9 6 12 3.5z"/><path d="M6 15.5h12M7.5 18.5h9M9 21.5h6"/></svg></span> Story Studio</button>
       <button class="nav-item" data-view="seriesmode"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="6" height="12" rx="1.2"/><rect x="9.5" y="4" width="6" height="16" rx="1.2"/><rect x="16" y="7" width="5" height="10" rx="1.2"/></svg></span> Series Mode <span class="soon-badge">soon</span></button>
       <button class="nav-item" data-view="publishing"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12 20 4l-4 16-5-6-6-2z"/></svg></span> Publishing <span class="soon-badge">soon</span></button>
       <button class="nav-item" data-view="brandkit"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 20.5 8v8L12 20.5 3.5 16V8z"/><path d="M12 3.5V20.5M3.5 8l8.5 4.5L20.5 8"/></svg></span> Brand Kit <span class="soon-badge">soon</span></button>
@@ -279,14 +279,47 @@
         </div>
       </div>
 
-      <!-- Coming soon views -->
+      <!-- Story Studio view -->
       <div class="view" id="view-storystudio">
-        <div class="placeholder-card panel">
-          <div class="big-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c.7 2.2-1.8 3-1.8 5.2a1.8 1.8 0 0 0 3.6 0c0-.7-.3-1.2-.3-1.2 1 .6 1.8 1.8 1.8 3.1A3.3 3.3 0 0 1 12 14a3.3 3.3 0 0 1-3.3-3.3C8.7 7.8 10.9 6 12 3.5z"/><path d="M6 15.5h12M7.5 18.5h9M9 21.5h6"/></svg></div>
-          <h2>Story Studio</h2>
-          <p>Turn AI-generated stories into narrated, fully-edited vertical videos — voiceover, background footage, and synced captions assembled automatically. In active development.</p>
+        <div class="panel">
+          <div class="row" style="justify-content:space-between;">
+            <div style="color:var(--text-dim);">AI-generated (or your own) short-form stories, scored by the Story Analyst before you spend time turning one into a video.</div>
+          </div>
+          <div class="focus-presets" id="storyModeTabs">
+            <button type="button" class="preset-chip active" data-mode="generate">Generate a story</button>
+            <button type="button" class="preset-chip" data-mode="analyze">Paste your own</button>
+          </div>
+
+          <div id="storyGenerateMode">
+            <div class="focus-presets" id="storyGenreChips"></div>
+            <div class="row" style="margin-top:14px;">
+              <button id="storyGenerateBtn">Generate story</button>
+            </div>
+          </div>
+
+          <div id="storyAnalyzeMode" style="display:none;">
+            <div class="row" style="margin-top:14px;">
+              <textarea class="story-textarea" id="storyTextInput" rows="8" placeholder="Paste a story, script, or draft here..."></textarea>
+            </div>
+            <div class="row" style="margin-top:10px;">
+              <button id="storyAnalyzeBtn">Analyze story</button>
+            </div>
+          </div>
+
+          <div class="status" id="storyStatus"></div>
+          <div id="storyResult"></div>
+        </div>
+
+        <div class="panel" style="margin-top:20px;">
+          <div class="row" style="justify-content:space-between;">
+            <div style="color:var(--text-dim);">Your saved stories.</div>
+            <button class="secondary" id="refreshStoriesBtn">Refresh</button>
+          </div>
+          <div class="results" id="storyProjectsList"></div>
         </div>
       </div>
+
+      <!-- Coming soon views -->
       <div class="view" id="view-seriesmode">
         <div class="placeholder-card panel">
           <div class="big-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="6" height="12" rx="1.2"/><rect x="9.5" y="4" width="6" height="16" rx="1.2"/><rect x="16" y="7" width="5" height="10" rx="1.2"/></svg></div>

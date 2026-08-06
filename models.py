@@ -194,6 +194,65 @@ class DiscoverFeed(db.Model):
     feed_json = db.Column(db.Text, nullable=False)  # JSON-encoded list of picks
 
 
+class StoryProject(db.Model):
+    """A generated-or-analyzed Story Studio story, with its Story Analyst
+    breakdown saved alongside it — same idea as Project for the Clip
+    Finder side: a run through the AI turns into a real saved workspace
+    entry instead of vanishing once the user navigates away.
+
+    sub_scores_json mirrors SavedClip.export_hashtags' approach: the ten
+    ANALYST_METRICS scores don't need individual queryable columns, just
+    a place to round-trip the dict as JSON."""
+
+    __tablename__ = "story_projects"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    title = db.Column(db.String(200), nullable=False, default="Untitled Story")
+    body = db.Column(db.Text, nullable=False)
+    genre = db.Column(db.String(50), nullable=False, default="user_submitted")
+    source = db.Column(db.String(20), nullable=False, default="generated")  # "generated" | "user_submitted"
+    overall_score = db.Column(db.Integer, default=0)
+    sub_scores_json = db.Column(db.Text, default="{}")  # JSON-encoded dict, ANALYST_METRICS keys
+    estimated_watch_time_seconds = db.Column(db.Integer, default=0)
+    reasoning = db.Column(db.Text, default="")
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+    # Video assembly pipeline (narrate + pick footage + composite) runs on
+    # a background thread, not inline in the request — these columns are
+    # what the status-polling route reads. "none" until a generate-video
+    # call kicks it off; video_path/video_error are mutually exclusive
+    # depending on how "processing" resolves.
+    video_status = db.Column(db.String(20), nullable=False, default="none")  # none|processing|ready|failed
+    video_path = db.Column(db.String(500), nullable=True)
+    video_error = db.Column(db.Text, nullable=True)
+    voice = db.Column(db.String(50), nullable=True)
+    footage_category = db.Column(db.String(50), nullable=True)
+
+
+class BackgroundFootage(db.Model):
+    """Catalog row for a video downloaded by footage_library.py into the
+    shared background-footage library. The actual bytes live on disk at
+    file_path (see footage_library.FOOTAGE_DIR) — this row is just the
+    queryable metadata layer on top, needed so Smart Pairing (picking a
+    category, ideally the least-recently-used clip in it) can be a DB
+    query instead of a directory scan on every story assembly.
+
+    Shared across all users (not user_id-scoped) — footage is curated
+    once by whoever runs the app, not uploaded per-user."""
+
+    __tablename__ = "background_footage"
+
+    id = db.Column(db.String(20), primary_key=True)  # footage_library's uuid-based id
+    category = db.Column(db.String(50), nullable=False, index=True)
+    source_url = db.Column(db.String(500), nullable=False)
+    title = db.Column(db.String(300), default="")
+    file_path = db.Column(db.String(500), nullable=False)
+    duration_seconds = db.Column(db.Float, default=0)
+    times_used = db.Column(db.Integer, default=0, nullable=False)  # Smart Pairing: prefer least-used
+    downloaded_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
 class AlertLog(db.Model):
     """Tracks the last time each one-off ops alert (e.g. "YouTube cookies
     expired") was sent, so a persistently-broken feature emails once and
