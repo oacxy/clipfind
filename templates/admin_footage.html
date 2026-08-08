@@ -61,6 +61,16 @@
   <button id="downloadBtn" type="button">Download footage</button>
   <div id="status"></div>
 
+  <div class="section-title">Server job status</div>
+  <div id="jobStatus" class="hint" style="margin-top:8px;">Enter your secret and Refresh list to check.</div>
+  <button class="secondary" id="unlockBtn" type="button" style="display:none;">Force-unlock (only if a job is stuck)</button>
+  <div class="hint">
+    Use this ONLY if the status above says a job is "running" but you're sure nothing is actually
+    happening (e.g. you never started anything, or it's been stuck for way longer than a download/video
+    should take). This clears the server's "busy" flag so a new job can start. If a job really is
+    running, this will make it collide with a new one — don't use it just because you're impatient.
+  </div>
+
   <div class="section-title">Current library</div>
   <button class="secondary" id="refreshBtn" type="button" style="margin-top:8px;">Refresh list</button>
   <table id="footageTable">
@@ -77,9 +87,54 @@
   const statusEl = document.getElementById('status');
   const refreshBtn = document.getElementById('refreshBtn');
   const footageTbody = document.getElementById('footageTbody');
+  const jobStatusEl = document.getElementById('jobStatus');
+  const unlockBtn = document.getElementById('unlockBtn');
 
   let pollTimer = null;
   let pollingForId = null;
+
+  function describeRunning(running) {
+    if (!running || !running.kind) return 'Nothing is running — the server is free.';
+    const started = running.started_at ? new Date(running.started_at).toLocaleTimeString() : 'unknown time';
+    return 'Running: ' + running.kind + ' — ' + (running.detail || '') + ' (started ' + started + ')';
+  }
+
+  async function checkJobStatus() {
+    const secret = secretInput.value.trim();
+    if (!secret) return;
+    try {
+      const res = await fetch('/api/admin/heavy-job-status?secret=' + encodeURIComponent(secret));
+      const data = await res.json();
+      if (!res.ok) {
+        jobStatusEl.textContent = data.error || 'Could not check job status.';
+        unlockBtn.style.display = 'none';
+        return;
+      }
+      jobStatusEl.textContent = describeRunning(data.running) + (data.locked && !data.running.kind ? ' (lock held, but no job info recorded — safe to force-unlock)' : '');
+      unlockBtn.style.display = data.locked ? 'inline-block' : 'none';
+    } catch (e) {
+      jobStatusEl.textContent = 'Network error checking job status.';
+    }
+  }
+
+  unlockBtn.addEventListener('click', async () => {
+    const secret = secretInput.value.trim();
+    if (!secret) { statusEl.className = 'error'; statusEl.textContent = 'Enter your CRON_SECRET first.'; return; }
+    if (!confirm('Only do this if you are sure no job is actually running. Continue?')) return;
+    try {
+      const res = await fetch('/api/admin/heavy-job-unlock?secret=' + encodeURIComponent(secret), { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        jobStatusEl.textContent = data.error || 'Could not unlock.';
+        return;
+      }
+      jobStatusEl.textContent = data.was_locked ? 'Unlocked — a new job can start now.' : 'Nothing was locked.';
+      unlockBtn.style.display = 'none';
+      downloadBtn.disabled = false;
+    } catch (e) {
+      jobStatusEl.textContent = 'Network error unlocking.';
+    }
+  });
 
   function stopPoll() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
@@ -106,14 +161,19 @@
       if (!res.ok) {
         statusEl.className = 'error';
         statusEl.textContent = data.error || 'Could not start the download.';
+        if (data.running) {
+          statusEl.textContent += ' (' + describeRunning(data.running) + ')';
+        }
         downloadBtn.disabled = false;
+        checkJobStatus();
         return;
       }
       urlInput.value = '';
       pollingForId = data.id;
       loadFootageList();
+      checkJobStatus();
       stopPoll();
-      pollTimer = setInterval(loadFootageList, 3000);
+      pollTimer = setInterval(function () { loadFootageList(); checkJobStatus(); }, 3000);
     } catch (e) {
       statusEl.className = 'error';
       statusEl.textContent = 'Network error starting the download.';
@@ -165,8 +225,9 @@
       statusEl.textContent = 'Network error loading the list.';
     }
   }
-  refreshBtn.addEventListener('click', loadFootageList);
+  refreshBtn.addEventListener('click', () => { loadFootageList(); checkJobStatus(); });
   loadFootageList(); // harmless no-op until a secret is entered — just shows the "enter secret" message on first load
+  checkJobStatus();
 </script>
 </body>
 </html>

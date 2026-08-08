@@ -1591,6 +1591,7 @@ def _run_footage_download_job(flask_app, footage_id: str, youtube_url: str, cate
     above for the full rationale (same pattern, same reason: a real
     yt-dlp download through a residential proxy can run for minutes, well
     past what's safe to do inline in a request)."""
+    print(f"[HEAVY_JOB_START] kind=footage_download footage_id={footage_id} url={youtube_url!r} category={category} max_minutes={max_minutes}", flush=True)
     try:
         with flask_app.app_context():
             row = db.session.get(BackgroundFootage, footage_id)
@@ -1616,6 +1617,7 @@ def _run_footage_download_job(flask_app, footage_id: str, youtube_url: str, cate
                     row2.error = str(e)[:500]
                     db.session.commit()
     finally:
+        _HEAVY_JOB_STATUS.update(kind=None, detail=None, started_at=None)
         _HEAVY_JOB_LOCK.release()
 
 
@@ -1656,10 +1658,18 @@ def admin_download_footage():
 
     if not _HEAVY_JOB_LOCK.acquire(blocking=False):
         return jsonify(
-            {"error": "Another footage download or video generation is already running on this server — try again in a minute."}
+            {
+                "error": "Another footage download or video generation is already running on this server — try again in a minute.",
+                "running": dict(_HEAVY_JOB_STATUS),
+            }
         ), 429
 
     footage_id = uuid.uuid4().hex[:12]
+    _HEAVY_JOB_STATUS.update(
+        kind="footage_download",
+        detail=f"{category}: {youtube_url}",
+        started_at=datetime.datetime.utcnow().isoformat(),
+    )
     row = BackgroundFootage(
         id=footage_id,
         category=category,
@@ -1711,6 +1721,46 @@ def admin_list_footage():
     )
 
 
+@app.route("/api/admin/heavy-job-status", methods=["GET"])
+def admin_heavy_job_status():
+    """Lets the footage admin page show what's currently holding
+    _HEAVY_JOB_LOCK (if anything) without having to trigger a 429 first —
+    the 429 response already includes this same "running" info, but this
+    lets the page show it proactively on load/refresh too."""
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET is not configured on this server."}), 500
+    if request.args.get("secret") != CRON_SECRET:
+        return jsonify({"error": "Forbidden."}), 403
+
+    return jsonify({"locked": _HEAVY_JOB_LOCK.locked(), "running": dict(_HEAVY_JOB_STATUS)})
+
+
+@app.route("/api/admin/heavy-job-unlock", methods=["POST"])
+def admin_heavy_job_unlock():
+    """Force-clears _HEAVY_JOB_LOCK. Meant for exactly one situation: a
+    background job's thread died or hung without reaching its `finally`
+    (e.g. the whole process was killed mid-job by Render, or a truly
+    unexpected crash) and the in-memory lock is now stuck "held" forever
+    with no thread left to release it. Restarting the Render service also
+    clears this (a fresh process gets a fresh, unlocked Lock object), but
+    that's a bigger hammer than this app should need for what's normally
+    a one-request fix.
+
+    Lock.release() raises RuntimeError if called on an already-unlocked
+    Lock, so .locked() is checked first — calling this when nothing is
+    actually stuck should be a harmless no-op, not a 500."""
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET is not configured on this server."}), 500
+    if request.args.get("secret") != CRON_SECRET:
+        return jsonify({"error": "Forbidden."}), 403
+
+    was_locked = _HEAVY_JOB_LOCK.locked()
+    if was_locked:
+        _HEAVY_JOB_LOCK.release()
+    _HEAVY_JOB_STATUS.update(kind=None, detail=None, started_at=None)
+    return jsonify({"was_locked": was_locked, "locked": _HEAVY_JOB_LOCK.locked()})
+
+
 @app.route("/api/story-studio/voices", methods=["GET"])
 @json_login_required
 def story_studio_voices():
@@ -1730,6 +1780,16 @@ def story_studio_voices():
 # past what one-at-a-time can keep up with.
 _HEAVY_JOB_LOCK = threading.Lock()
 
+# What's currently holding _HEAVY_JOB_LOCK, if anything — purely for
+# visibility (the "which job is this?" question a bare Lock can't answer
+# on its own). Without this, a stuck lock was indistinguishable from a
+# healthy one from the outside — the first real instance of that
+# (August 2026) required a full service restart just to find out nothing
+# useful, since there was no log line for a job *starting*, only for one
+# *failing*. Plain dict + no lock of its own: only ever mutated by
+# whichever thread currently holds _HEAVY_JOB_LOCK, so it can't race.
+_HEAVY_JOB_STATUS = {"kind": None, "detail": None, "started_at": None}
+
 
 def _run_story_video_job(flask_app, story_id: int, footage_row_id: str, voice: str) -> None:
     """Runs on a background daemon thread, kicked off (and immediately
@@ -1737,6 +1797,7 @@ def _run_story_video_job(flask_app, story_id: int, footage_row_id: str, voice: s
     since it's not running inside a request anymore — that's also why
     this takes the Flask app object explicitly rather than closing over
     the global, to keep the dependency obvious at the call site."""
+    print(f"[HEAVY_JOB_START] kind=story_video story_id={story_id} voice={voice}", flush=True)
     try:
         with flask_app.app_context():
             story = db.session.get(StoryProject, story_id)
@@ -1775,6 +1836,7 @@ def _run_story_video_job(flask_app, story_id: int, footage_row_id: str, voice: s
                     story2.video_error = str(e)[:500]
                     db.session.commit()
     finally:
+        _HEAVY_JOB_STATUS.update(kind=None, detail=None, started_at=None)
         _HEAVY_JOB_LOCK.release()
 
 
@@ -1821,8 +1883,17 @@ def story_studio_generate_video(project_id):
 
     if not _HEAVY_JOB_LOCK.acquire(blocking=False):
         return jsonify(
-            {"error": "Another video is already being generated on this server — try again in a minute."}
+            {
+                "error": "Another video is already being generated on this server — try again in a minute.",
+                "running": dict(_HEAVY_JOB_STATUS),
+            }
         ), 429
+
+    _HEAVY_JOB_STATUS.update(
+        kind="story_video",
+        detail=f"story {story.id}: {story.title}",
+        started_at=datetime.datetime.utcnow().isoformat(),
+    )
 
     story.video_status = "processing"
     story.video_error = None
