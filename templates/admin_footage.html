@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="robots" content="noindex, nofollow">
+<title>ClipFind — Footage Admin</title>
+<style>
+  body { background:#0a0a0f; color:#f2f2f5; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; max-width:640px; margin:0 auto; padding:32px 16px; }
+  h1 { font-size:1.3rem; margin-bottom:4px; }
+  p.sub { color:#9a9aa8; font-size:0.85rem; margin-bottom:24px; line-height:1.5; }
+  label { display:block; font-size:0.8rem; color:#9a9aa8; margin-bottom:6px; margin-top:16px; }
+  input[type=text], input[type=password], select {
+    width:100%; box-sizing:border-box; padding:10px 12px; border-radius:8px;
+    border:1px solid #26262f; background:#16161f; color:#f2f2f5; font-size:0.9rem; font-family:inherit;
+  }
+  button {
+    margin-top:18px; padding:10px 18px; border-radius:8px; border:none;
+    background:linear-gradient(135deg,#7c5cff,#ff5c9a); color:white; font-weight:600;
+    cursor:pointer; font-size:0.88rem;
+  }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  button.secondary { background:#16161f; border:1px solid #26262f; color:#f2f2f5; }
+  #status { margin-top:14px; font-size:0.85rem; color:#9a9aa8; min-height:1.2em; line-height:1.5; }
+  #status.error { color:#ff6b6b; }
+  table { width:100%; border-collapse:collapse; margin-top:16px; font-size:0.82rem; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid #26262f; }
+  th { color:#9a9aa8; font-weight:600; }
+  .section-title { font-size:0.95rem; font-weight:700; margin-top:32px; margin-bottom:4px; }
+</style>
+</head>
+<body>
+  <h1>Footage Admin</h1>
+  <p class="sub">
+    Downloads background gameplay/relaxation footage into the shared library Story Studio's video
+    generator pulls from. Not linked from the main app — bookmark this page. Every action here calls
+    the same secret-gated backend routes the cron jobs use, so nothing happens without the real
+    server secret below.
+  </p>
+
+  <label for="secretInput">Server secret (your CRON_SECRET)</label>
+  <input type="password" id="secretInput" placeholder="Paste your CRON_SECRET" autocomplete="off" />
+
+  <label for="urlInput">YouTube URL</label>
+  <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
+
+  <label for="categorySelect">Category</label>
+  <select id="categorySelect">
+    {% for c in categories %}
+    <option value="{{ c.key }}">{{ c.label }} — {{ c.hint }}</option>
+    {% endfor %}
+  </select>
+
+  <button id="downloadBtn" type="button">Download footage</button>
+  <div id="status"></div>
+
+  <div class="section-title">Current library</div>
+  <button class="secondary" id="refreshBtn" type="button" style="margin-top:8px;">Refresh list</button>
+  <table id="footageTable">
+    <thead><tr><th>Category</th><th>Title</th><th>Duration</th><th>Used</th><th>Downloaded</th></tr></thead>
+    <tbody id="footageTbody"></tbody>
+  </table>
+
+<script>
+  const secretInput = document.getElementById('secretInput');
+  const urlInput = document.getElementById('urlInput');
+  const categorySelect = document.getElementById('categorySelect');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const statusEl = document.getElementById('status');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const footageTbody = document.getElementById('footageTbody');
+
+  downloadBtn.addEventListener('click', async () => {
+    const secret = secretInput.value.trim();
+    const url = urlInput.value.trim();
+    const category = categorySelect.value;
+    if (!secret) { statusEl.className = 'error'; statusEl.textContent = 'Enter your CRON_SECRET first.'; return; }
+    if (!url) { statusEl.className = 'error'; statusEl.textContent = 'Paste a YouTube URL first.'; return; }
+    downloadBtn.disabled = true;
+    statusEl.className = '';
+    statusEl.textContent = 'Downloading… this can take a minute or two for longer videos.';
+    try {
+      const res = await fetch('/api/admin/footage/download?secret=' + encodeURIComponent(secret), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ youtube_url: url, category: category }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        statusEl.className = 'error';
+        statusEl.textContent = data.error || 'Download failed.';
+        return;
+      }
+      statusEl.className = '';
+      statusEl.textContent = 'Downloaded: ' + data.title + ' (' + Math.round(data.duration_seconds) + 's)';
+      urlInput.value = '';
+      loadFootageList();
+    } catch (e) {
+      statusEl.className = 'error';
+      statusEl.textContent = 'Network error.';
+    } finally {
+      downloadBtn.disabled = false;
+    }
+  });
+
+  async function loadFootageList() {
+    const secret = secretInput.value.trim();
+    if (!secret) {
+      statusEl.className = 'error';
+      statusEl.textContent = 'Enter your CRON_SECRET first, then Refresh list.';
+      return;
+    }
+    try {
+      const res = await fetch('/api/admin/footage?secret=' + encodeURIComponent(secret));
+      const data = await res.json();
+      if (!res.ok) {
+        statusEl.className = 'error';
+        statusEl.textContent = data.error || 'Could not load the footage list.';
+        return;
+      }
+      footageTbody.innerHTML = data.footage.map(function (f) {
+        return '<tr>' +
+          '<td>' + f.category + '</td>' +
+          '<td>' + f.title + '</td>' +
+          '<td>' + Math.round(f.duration_seconds) + 's</td>' +
+          '<td>' + f.times_used + '</td>' +
+          '<td>' + new Date(f.downloaded_at).toLocaleDateString() + '</td>' +
+        '</tr>';
+      }).join('');
+    } catch (e) {
+      statusEl.className = 'error';
+      statusEl.textContent = 'Network error loading the list.';
+    }
+  }
+  refreshBtn.addEventListener('click', loadFootageList);
+</script>
+</body>
+</html>

@@ -1545,6 +1545,20 @@ def story_studio_footage_categories():
     )
 
 
+@app.route("/admin/footage", methods=["GET"])
+def admin_footage_page():
+    """Small standalone utility page for downloading background footage
+    into the shared library — deliberately NOT linked from the main app's
+    nav, since curating footage is an ops action for whoever runs
+    ClipFind, not a per-user feature (same reasoning as the secret-gated
+    API routes below). The page itself loads without any gate, but every
+    actual action it performs (download, list) calls those same
+    CRON_SECRET-gated routes, so nothing happens without the real secret
+    being typed in — the page is just a form around curl, not a new
+    permission boundary."""
+    return render_template("admin_footage.html", categories=FOOTAGE_CATEGORIES)
+
+
 @app.route("/api/admin/footage/download", methods=["POST"])
 def admin_download_footage():
     """Curating the shared background-footage library is an ops action
