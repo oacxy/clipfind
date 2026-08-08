@@ -44,6 +44,34 @@
   <label for="secretInput">Server secret (your CRON_SECRET)</label>
   <input type="password" id="secretInput" placeholder="Paste your CRON_SECRET" autocomplete="off" />
 
+  <div class="section-title">Upload a video file (recommended)</div>
+  <p class="sub" style="margin-bottom:12px;">
+    Download the YouTube video yourself (any way you like), then upload the finished .mp4 here.
+    No proxy, no bot-detection, nothing to babysit — this just saves the file and adds it to the library.
+  </p>
+
+  <label for="uploadCategorySelect">Category</label>
+  <select id="uploadCategorySelect">
+    {% for c in categories %}
+    <option value="{{ c.key }}">{{ c.label }} — {{ c.hint }}</option>
+    {% endfor %}
+  </select>
+
+  <label for="uploadTitleInput">Title (optional)</label>
+  <input type="text" id="uploadTitleInput" placeholder="e.g. Minecraft parkour compilation #3" />
+
+  <label for="uploadFileInput">Video file (.mp4)</label>
+  <input type="file" id="uploadFileInput" accept="video/mp4" />
+
+  <button id="uploadBtn" type="button">Upload footage</button>
+  <div id="uploadStatus" style="margin-top:14px; font-size:0.85rem; color:#9a9aa8; min-height:1.2em; line-height:1.5;"></div>
+
+  <div class="section-title" style="margin-top:36px;">Or: let the server download it from a URL</div>
+  <p class="hint" style="margin-bottom:12px;">
+    This goes through YouTube's bot-detection and a proxy, so it's less reliable than uploading —
+    only use this if uploading isn't an option.
+  </p>
+
   <label for="urlInput">YouTube URL</label>
   <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
 
@@ -89,6 +117,50 @@
   const footageTbody = document.getElementById('footageTbody');
   const jobStatusEl = document.getElementById('jobStatus');
   const unlockBtn = document.getElementById('unlockBtn');
+  const uploadCategorySelect = document.getElementById('uploadCategorySelect');
+  const uploadTitleInput = document.getElementById('uploadTitleInput');
+  const uploadFileInput = document.getElementById('uploadFileInput');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const uploadStatusEl = document.getElementById('uploadStatus');
+
+  uploadBtn.addEventListener('click', async () => {
+    const secret = secretInput.value.trim();
+    const category = uploadCategorySelect.value;
+    const title = uploadTitleInput.value.trim();
+    const file = uploadFileInput.files[0];
+    if (!secret) { uploadStatusEl.style.color = '#ff6b6b'; uploadStatusEl.textContent = 'Enter your CRON_SECRET first.'; return; }
+    if (!file) { uploadStatusEl.style.color = '#ff6b6b'; uploadStatusEl.textContent = 'Choose an .mp4 file first.'; return; }
+    uploadBtn.disabled = true;
+    uploadStatusEl.style.color = '#9a9aa8';
+    uploadStatusEl.textContent = 'Uploading "' + file.name + '"... this can take a bit for larger files.';
+    try {
+      const formData = new FormData();
+      formData.append('category', category);
+      formData.append('title', title);
+      formData.append('file', file);
+      const res = await fetch('/api/admin/footage/upload?secret=' + encodeURIComponent(secret), {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        uploadStatusEl.style.color = '#ff6b6b';
+        uploadStatusEl.textContent = data.error || 'Upload failed.';
+        uploadBtn.disabled = false;
+        return;
+      }
+      uploadStatusEl.style.color = '#3ddc97';
+      uploadStatusEl.textContent = 'Added — ready to use (' + Math.round(data.duration_seconds) + 's).';
+      uploadFileInput.value = '';
+      uploadTitleInput.value = '';
+      uploadBtn.disabled = false;
+      loadFootageList();
+    } catch (e) {
+      uploadStatusEl.style.color = '#ff6b6b';
+      uploadStatusEl.textContent = 'Network error uploading the file.';
+      uploadBtn.disabled = false;
+    }
+  });
 
   let pollTimer = null;
   let pollingForId = null;

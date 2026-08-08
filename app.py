@@ -45,7 +45,14 @@ from discover import build_discover_feed
 from digest import send_digest_emails, generate_unsubscribe_token, verify_unsubscribe_token, send_email
 from captions import build_ass_subtitle, chunk_captions_for_clip, STYLE_PRESETS, DEFAULT_STYLE
 from story_studio import generate_story, analyze_story, GENRES, ANALYST_METRICS
-from footage_library import download_footage, list_footage, FOOTAGE_CATEGORIES, FOOTAGE_CATEGORY_KEYS
+from footage_library import (
+    download_footage,
+    list_footage,
+    FOOTAGE_CATEGORIES,
+    FOOTAGE_CATEGORY_KEYS,
+    FOOTAGE_DIR,
+    _probe_duration as probe_footage_duration,
+)
 from azure_tts import narrate_story, is_configured as tts_is_configured, VOICES, DEFAULT_VOICE, VOICE_KEYS
 from video_assembly import assemble_story_video, STORY_VIDEO_DIR
 
@@ -76,6 +83,10 @@ from models import (
 )
 
 app = Flask(__name__)
+# 800MB cap on request bodies — mainly for /api/admin/footage/upload's
+# manual mp4 uploads, so an oversized file fails fast with a clean 413
+# instead of slowly eating server memory/disk.
+app.config["MAX_CONTENT_LENGTH"] = 800 * 1024 * 1024
 
 DEMO_TRANSCRIPT_PATH = "sample_transcript.txt"
 CLIPS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clips_output")
@@ -1691,6 +1702,64 @@ def admin_download_footage():
     thread.start()
 
     return jsonify({"id": footage_id, "status": "downloading"})
+
+
+@app.route("/api/admin/footage/upload", methods=["POST"])
+def admin_upload_footage():
+    """Manual alternative to /api/admin/footage/download. The automated
+    path (yt-dlp through a residential proxy, fighting YouTube's
+    bot-detection) is fragile enough that downloading the video through
+    a browser and uploading the finished mp4 here is often just more
+    reliable — especially for a one-person ops job like curating this
+    library. No proxy, no cookies, no background job, no _HEAVY_JOB_LOCK
+    involved at all: this is a plain file save + duration probe, so it
+    finishes and responds within the request itself."""
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET is not configured on this server."}), 500
+    if request.args.get("secret") != CRON_SECRET:
+        return jsonify({"error": "Forbidden."}), 403
+
+    category = (request.form.get("category") or "").strip()
+    if category not in FOOTAGE_CATEGORY_KEYS:
+        return jsonify({"error": f"category must be one of: {', '.join(sorted(FOOTAGE_CATEGORY_KEYS))}."}), 400
+
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"error": "No file was uploaded."}), 400
+    if not uploaded.filename.lower().endswith(".mp4"):
+        return jsonify({"error": "Only .mp4 files are supported."}), 400
+
+    title = (request.form.get("title") or "").strip() or uploaded.filename
+
+    footage_id = uuid.uuid4().hex[:12]
+    category_dir = os.path.join(FOOTAGE_DIR, category)
+    os.makedirs(category_dir, exist_ok=True)
+    out_path = os.path.join(category_dir, f"{footage_id}.mp4")
+    uploaded.save(out_path)
+
+    try:
+        duration = probe_footage_duration(out_path)
+    except Exception as e:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass  # best-effort cleanup — don't let a failed delete turn a clean 400 into a 500
+        return jsonify({"error": f"That doesn't look like a valid video file ({e})."}), 400
+
+    row = BackgroundFootage(
+        id=footage_id,
+        category=category,
+        source_url="manual upload",
+        title=title,
+        file_path=out_path,
+        duration_seconds=duration,
+        status="ready",
+        downloaded_at=datetime.datetime.utcnow(),
+    )
+    db.session.add(row)
+    db.session.commit()
+
+    return jsonify({"id": footage_id, "status": "ready", "duration_seconds": duration})
 
 
 @app.route("/api/admin/footage", methods=["GET"])
