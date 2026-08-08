@@ -123,11 +123,17 @@ def download_footage(
     category: str,
     max_minutes: int = DEFAULT_MAX_MINUTES,
     max_height: int = DEFAULT_MAX_HEIGHT,
+    footage_id: Optional[str] = None,
 ) -> dict:
     """Downloads (up to max_minutes of) a YouTube video into the footage
     library, categorized for later Smart Pairing (matching a story's mood
     to a footage category — that matching logic comes with the video
     assembly pipeline, Task #61).
+
+    footage_id: pass this when a caller already created a placeholder DB
+    row (e.g. a "downloading" BackgroundFootage row) before calling this
+    function, so the file this writes lines up with that row's id instead
+    of getting a second, orphaned uuid.
 
     Returns a metadata dict a caller can hand straight to a
     BackgroundFootage DB row once that model exists (Task #62). Raises
@@ -149,7 +155,7 @@ def download_footage(
 
     import yt_dlp  # lazy import, same reasoning as cut_youtube_clip
 
-    footage_id = uuid.uuid4().hex[:12]
+    footage_id = footage_id or uuid.uuid4().hex[:12]
     workdir = tempfile.mkdtemp(prefix=f"footage_{footage_id}_")
     raw_template = os.path.join(workdir, "raw.%(ext)s")
     category_dir = os.path.join(FOOTAGE_DIR, category)

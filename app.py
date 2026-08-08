@@ -198,11 +198,38 @@ def _ensure_story_video_columns():
         print(f"[MIGRATION] added {len(statements)} video-pipeline column(s) to story_projects", flush=True)
 
 
+def _ensure_footage_status_columns():
+    """Same story as _ensure_story_video_columns — background_footage
+    might be a table db.create_all() just created fresh (nothing to do),
+    or it might already exist from before the download was backgrounded,
+    with real rows that predate the status/error columns. Those existing
+    rows already have a real file on disk, so they default to "ready"
+    rather than getting stuck showing as "downloading" forever."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(db.engine)
+    if "background_footage" not in inspector.get_table_names():
+        return
+    existing_cols = {c["name"] for c in inspector.get_columns("background_footage")}
+    statements = []
+    if "status" not in existing_cols:
+        statements.append("ALTER TABLE background_footage ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'ready'")
+    if "error" not in existing_cols:
+        statements.append("ALTER TABLE background_footage ADD COLUMN error TEXT")
+    if statements:
+        with db.engine.connect() as conn:
+            for stmt in statements:
+                conn.execute(text(stmt))
+            conn.commit()
+        print(f"[MIGRATION] added {len(statements)} status column(s) to background_footage", flush=True)
+
+
 with app.app_context():
     db.create_all()
     _ensure_email_opt_in_column()
     _ensure_referral_columns()
     _ensure_story_video_columns()
+    _ensure_footage_status_columns()
 
 # --- Auth ---------------------------------------------------------------
 login_manager = LoginManager()
@@ -1559,6 +1586,39 @@ def admin_footage_page():
     return render_template("admin_footage.html", categories=FOOTAGE_CATEGORIES)
 
 
+def _run_footage_download_job(flask_app, footage_id: str, youtube_url: str, category: str, max_minutes: int) -> None:
+    """Runs on a background daemon thread — see _run_story_video_job just
+    above for the full rationale (same pattern, same reason: a real
+    yt-dlp download through a residential proxy can run for minutes, well
+    past what's safe to do inline in a request)."""
+    try:
+        with flask_app.app_context():
+            row = db.session.get(BackgroundFootage, footage_id)
+            if not row:
+                return  # row got deleted somehow while this was running
+            try:
+                meta = download_footage(youtube_url, category, max_minutes=max_minutes, footage_id=footage_id)
+                row.category = meta["category"]
+                row.source_url = meta["source_url"]
+                row.title = meta["title"]
+                row.file_path = meta["file_path"]
+                row.duration_seconds = meta["duration_seconds"]
+                row.downloaded_at = meta["downloaded_at"]
+                row.status = "ready"
+                row.error = None
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"[FOOTAGE_DOWNLOAD_JOB_FAILED] footage_id={footage_id} {type(e).__name__}: {e}", flush=True)
+                row2 = db.session.get(BackgroundFootage, footage_id)
+                if row2:
+                    row2.status = "failed"
+                    row2.error = str(e)[:500]
+                    db.session.commit()
+    finally:
+        _HEAVY_JOB_LOCK.release()
+
+
 @app.route("/api/admin/footage/download", methods=["POST"])
 def admin_download_footage():
     """Curating the shared background-footage library is an ops action
@@ -1566,7 +1626,16 @@ def admin_download_footage():
     not something individual users trigger — a public user-facing
     endpoint here would mean anyone could rack up Webshare bandwidth and
     server CPU on demand. Secret-gated the same way the cron endpoints
-    are, since both are "trusted caller, not a signed-in user" actions."""
+    are, since both are "trusted caller, not a signed-in user" actions.
+
+    Kicks the actual download off on a background thread rather than
+    downloading inline — a real download can run for minutes (up to
+    max_minutes of source video through a residential proxy), and Render's
+    front-door has a request timeout well short of that. Running it
+    inline meant this request would get killed mid-download, which showed
+    up client-side as a generic "Network error" even when the download
+    itself might have kept going or eventually succeeded server-side.
+    """
     if not CRON_SECRET:
         return jsonify({"error": "CRON_SECRET is not configured on this server."}), 500
     if request.args.get("secret") != CRON_SECRET:
@@ -1585,31 +1654,33 @@ def admin_download_footage():
     except (ValueError, TypeError):
         max_minutes = 15
 
-    try:
-        meta = download_footage(youtube_url, category, max_minutes=max_minutes)
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 502
+    if not _HEAVY_JOB_LOCK.acquire(blocking=False):
+        return jsonify(
+            {"error": "Another footage download or video generation is already running on this server — try again in a minute."}
+        ), 429
 
+    footage_id = uuid.uuid4().hex[:12]
     row = BackgroundFootage(
-        id=meta["id"],
-        category=meta["category"],
-        source_url=meta["source_url"],
-        title=meta["title"],
-        file_path=meta["file_path"],
-        duration_seconds=meta["duration_seconds"],
-        downloaded_at=meta["downloaded_at"],
+        id=footage_id,
+        category=category,
+        source_url=youtube_url,
+        title=youtube_url,  # placeholder until the real title comes back from yt-dlp
+        file_path=None,
+        duration_seconds=0,
+        status="downloading",
+        downloaded_at=datetime.datetime.utcnow(),
     )
     db.session.add(row)
     db.session.commit()
 
-    return jsonify(
-        {
-            "id": row.id,
-            "category": row.category,
-            "title": row.title,
-            "duration_seconds": row.duration_seconds,
-        }
+    thread = threading.Thread(
+        target=_run_footage_download_job,
+        args=(app, footage_id, youtube_url, category, max_minutes),
+        daemon=True,
     )
+    thread.start()
+
+    return jsonify({"id": footage_id, "status": "downloading"})
 
 
 @app.route("/api/admin/footage", methods=["GET"])
@@ -1631,6 +1702,8 @@ def admin_list_footage():
                     "duration_seconds": r.duration_seconds,
                     "times_used": r.times_used,
                     "downloaded_at": r.downloaded_at.isoformat(),
+                    "status": r.status,
+                    "error": r.error,
                 }
                 for r in rows
             ]
@@ -1644,17 +1717,18 @@ def story_studio_voices():
     return jsonify({"voices": VOICES, "tts_configured": tts_is_configured()})
 
 
-# One video-assembly job at a time, server-wide — not per-user. This app
-# runs as a single gunicorn worker (see the OOM history earlier: Discover
-# refresh alone was enough to take the whole instance down), and each
-# job here is a real TTS network call plus an ffmpeg encode. Running the
-# work on a background thread (rather than blocking the request) already
-# keeps the app responsive to OTHER requests while a video assembles —
+# One heavy background job at a time, server-wide — not per-user, and
+# shared between story-video assembly AND footage downloads (both land
+# here). This app runs as a single gunicorn worker (see the OOM history
+# earlier: Discover refresh alone was enough to take the whole instance
+# down), and both job types are real, sustained network + CPU work.
+# Running them on a background thread (rather than blocking the request)
+# already keeps the app responsive to OTHER requests while one runs —
 # this lock is the next layer: it stops two heavy jobs from stacking up
 # and fighting over the same limited RAM/CPU at once. A real job queue
 # (Celery/RQ + Redis) would be the eventual right answer if usage grows
 # past what one-at-a-time can keep up with.
-_STORY_VIDEO_LOCK = threading.Lock()
+_HEAVY_JOB_LOCK = threading.Lock()
 
 
 def _run_story_video_job(flask_app, story_id: int, footage_row_id: str, voice: str) -> None:
@@ -1701,7 +1775,7 @@ def _run_story_video_job(flask_app, story_id: int, footage_row_id: str, voice: s
                     story2.video_error = str(e)[:500]
                     db.session.commit()
     finally:
-        _STORY_VIDEO_LOCK.release()
+        _HEAVY_JOB_LOCK.release()
 
 
 @app.route("/api/story-studio/projects/<int:project_id>/generate-video", methods=["POST"])
@@ -1731,18 +1805,21 @@ def story_studio_generate_video(project_id):
     # Smart Pairing (basic version): least-used clip in the category, not
     # a pure-random pick, so the same background loop doesn't show up in
     # every story back-to-back once there's more than one option to
-    # choose from per category.
+    # choose from per category. status="ready" excludes rows still
+    # downloading or that failed — picking one of those would just make
+    # this job fail immediately when it tries to read a file that isn't
+    # there yet (or ever).
     footage = (
-        BackgroundFootage.query.filter_by(category=footage_category)
+        BackgroundFootage.query.filter_by(category=footage_category, status="ready")
         .order_by(BackgroundFootage.times_used.asc(), BackgroundFootage.downloaded_at.asc())
         .first()
     )
     if not footage:
         return jsonify(
-            {"error": f"No background footage has been downloaded for '{footage_category}' yet."}
+            {"error": f"No ready background footage for '{footage_category}' yet — check the footage admin page."}
         ), 400
 
-    if not _STORY_VIDEO_LOCK.acquire(blocking=False):
+    if not _HEAVY_JOB_LOCK.acquire(blocking=False):
         return jsonify(
             {"error": "Another video is already being generated on this server — try again in a minute."}
         ), 429

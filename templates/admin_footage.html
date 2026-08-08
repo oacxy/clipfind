@@ -25,7 +25,11 @@
   table { width:100%; border-collapse:collapse; margin-top:16px; font-size:0.82rem; }
   th, td { text-align:left; padding:8px 6px; border-bottom:1px solid #26262f; }
   th { color:#9a9aa8; font-weight:600; }
+  td.status-downloading { color:#e8c15a; }
+  td.status-ready { color:#3ddc97; }
+  td.status-failed { color:#ff6b6b; }
   .section-title { font-size:0.95rem; font-weight:700; margin-top:32px; margin-bottom:4px; }
+  .hint { font-size:0.72rem; color:#5a5a68; margin-top:5px; }
 </style>
 </head>
 <body>
@@ -50,13 +54,17 @@
     {% endfor %}
   </select>
 
+  <label for="maxMinutesInput">Minutes to download</label>
+  <input type="text" id="maxMinutesInput" value="15" />
+  <div class="hint">Downloads run in the background now, so this won't time out — but for a quick first test, try 2 instead of 15.</div>
+
   <button id="downloadBtn" type="button">Download footage</button>
   <div id="status"></div>
 
   <div class="section-title">Current library</div>
   <button class="secondary" id="refreshBtn" type="button" style="margin-top:8px;">Refresh list</button>
   <table id="footageTable">
-    <thead><tr><th>Category</th><th>Title</th><th>Duration</th><th>Used</th><th>Downloaded</th></tr></thead>
+    <thead><tr><th>Category</th><th>Title</th><th>Status</th><th>Duration</th><th>Used</th><th>Downloaded</th></tr></thead>
     <tbody id="footageTbody"></tbody>
   </table>
 
@@ -64,40 +72,51 @@
   const secretInput = document.getElementById('secretInput');
   const urlInput = document.getElementById('urlInput');
   const categorySelect = document.getElementById('categorySelect');
+  const maxMinutesInput = document.getElementById('maxMinutesInput');
   const downloadBtn = document.getElementById('downloadBtn');
   const statusEl = document.getElementById('status');
   const refreshBtn = document.getElementById('refreshBtn');
   const footageTbody = document.getElementById('footageTbody');
 
+  let pollTimer = null;
+  let pollingForId = null;
+
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    pollingForId = null;
+  }
+
   downloadBtn.addEventListener('click', async () => {
     const secret = secretInput.value.trim();
     const url = urlInput.value.trim();
     const category = categorySelect.value;
+    const maxMinutes = parseInt(maxMinutesInput.value, 10) || 15;
     if (!secret) { statusEl.className = 'error'; statusEl.textContent = 'Enter your CRON_SECRET first.'; return; }
     if (!url) { statusEl.className = 'error'; statusEl.textContent = 'Paste a YouTube URL first.'; return; }
     downloadBtn.disabled = true;
     statusEl.className = '';
-    statusEl.textContent = 'Downloading… this can take a minute or two for longer videos.';
+    statusEl.textContent = 'Started — downloading in the background. This page will update automatically; feel free to leave it running.';
     try {
       const res = await fetch('/api/admin/footage/download?secret=' + encodeURIComponent(secret), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ youtube_url: url, category: category }),
+        body: JSON.stringify({ youtube_url: url, category: category, max_minutes: maxMinutes }),
       });
       const data = await res.json();
       if (!res.ok) {
         statusEl.className = 'error';
-        statusEl.textContent = data.error || 'Download failed.';
+        statusEl.textContent = data.error || 'Could not start the download.';
+        downloadBtn.disabled = false;
         return;
       }
-      statusEl.className = '';
-      statusEl.textContent = 'Downloaded: ' + data.title + ' (' + Math.round(data.duration_seconds) + 's)';
       urlInput.value = '';
+      pollingForId = data.id;
       loadFootageList();
+      stopPoll();
+      pollTimer = setInterval(loadFootageList, 3000);
     } catch (e) {
       statusEl.className = 'error';
-      statusEl.textContent = 'Network error.';
-    } finally {
+      statusEl.textContent = 'Network error starting the download.';
       downloadBtn.disabled = false;
     }
   });
@@ -121,17 +140,33 @@
         return '<tr>' +
           '<td>' + f.category + '</td>' +
           '<td>' + f.title + '</td>' +
+          '<td class="status-' + f.status + '">' + f.status + (f.status === 'failed' && f.error ? ': ' + f.error : '') + '</td>' +
           '<td>' + Math.round(f.duration_seconds) + 's</td>' +
           '<td>' + f.times_used + '</td>' +
           '<td>' + new Date(f.downloaded_at).toLocaleDateString() + '</td>' +
         '</tr>';
       }).join('');
+
+      // If we're watching a specific in-progress download, stop polling
+      // and re-enable the button once it resolves either way.
+      if (pollingForId) {
+        const watched = data.footage.find(function (f) { return f.id === pollingForId; });
+        if (watched && watched.status !== 'downloading') {
+          stopPoll();
+          downloadBtn.disabled = false;
+          statusEl.className = watched.status === 'failed' ? 'error' : '';
+          statusEl.textContent = watched.status === 'ready'
+            ? 'Downloaded: ' + watched.title + ' (' + Math.round(watched.duration_seconds) + 's)'
+            : 'Failed: ' + (watched.error || 'unknown error');
+        }
+      }
     } catch (e) {
       statusEl.className = 'error';
       statusEl.textContent = 'Network error loading the list.';
     }
   }
   refreshBtn.addEventListener('click', loadFootageList);
+  loadFootageList(); // harmless no-op until a secret is entered — just shows the "enter secret" message on first load
 </script>
 </body>
 </html>

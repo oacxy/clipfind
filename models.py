@@ -247,10 +247,23 @@ class BackgroundFootage(db.Model):
     category = db.Column(db.String(50), nullable=False, index=True)
     source_url = db.Column(db.String(500), nullable=False)
     title = db.Column(db.String(300), default="")
-    file_path = db.Column(db.String(500), nullable=False)
+    # Nullable — the row is created up front (id assigned) before the
+    # background download even starts, so there's no real file yet while
+    # status="downloading". See status/error below.
+    file_path = db.Column(db.String(500), nullable=True)
     duration_seconds = db.Column(db.Float, default=0)
     times_used = db.Column(db.Integer, default=0, nullable=False)  # Smart Pairing: prefer least-used
     downloaded_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+    # The actual yt-dlp download runs on a background thread (kicked off
+    # by /api/admin/footage/download, same reasoning as StoryProject's
+    # video_status above) — a 15-minute footage download through a
+    # residential proxy can easily outlast Render's front-door request
+    # timeout if it runs inline. Existing rows created before this column
+    # existed already have a real file_path, so the migration backfills
+    # them to "ready" rather than leaving them in limbo.
+    status = db.Column(db.String(20), nullable=False, default="ready")  # downloading|ready|failed
+    error = db.Column(db.Text, nullable=True)
 
 
 class AlertLog(db.Model):
