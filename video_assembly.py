@@ -164,13 +164,27 @@ def assemble_story_video(
         "-map", "0:v", "-map", "1:a",
         "-vf", ",".join(vf_parts),
         "-t", str(audio_duration),
-        "-c:v", "libx264", "-crf", "20", "-preset", "medium",
+        # "medium" was hitting the timeout below in real testing —
+        # looping footage + burning captions at 1080x1920 is heavier than
+        # a plain clip cut, and Render's CPU is the same constrained
+        # instance that already forced app.py's clip-cutting path to
+        # "veryfast" for free-tier (see that comment for the full
+        # reasoning). CRF stays fixed as the quality target; preset is
+        # the speed knob. Short-form vertical video doesn't need
+        # "medium"'s extra compression efficiency badly enough to be
+        # worth timing out over.
+        "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
         "-c:a", "aac",
         out_path,
     ]
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+        # Bumped from 600s as a safety margin on top of the preset fix —
+        # this runs on a background thread (Task #67/#68's pattern), not
+        # tied to an HTTP request timeout, so there's no reason to cut it
+        # off aggressively. This is a last-resort cap against a truly
+        # hung ffmpeg process, not a target duration.
+        subprocess.run(cmd, check=True, capture_output=True, timeout=1200)
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode("utf-8", errors="replace")[-500:] if e.stderr else str(e)
         raise RuntimeError(f"Video assembly failed ({stderr}).")
