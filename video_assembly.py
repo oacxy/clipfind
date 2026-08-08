@@ -35,7 +35,13 @@ from typing import List, Optional
 
 from captions import build_ass_subtitle, STYLE_PRESETS, DEFAULT_STYLE
 
-STORY_VIDEO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "story_videos")
+# Same ephemeral-filesystem reasoning as footage_library.py's FOOTAGE_DIR
+# — a generated video sitting on local disk would vanish on the next
+# deploy before a user necessarily gets around to watching/downloading
+# it. Shares the same PERSISTENT_DATA_DIR env var so both land on the
+# same mounted Disk once one is attached.
+_DATA_ROOT = os.environ.get("PERSISTENT_DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+STORY_VIDEO_DIR = os.path.join(_DATA_ROOT, "story_videos")
 os.makedirs(STORY_VIDEO_DIR, exist_ok=True)
 
 DEFAULT_OUTPUT_WIDTH = 1080

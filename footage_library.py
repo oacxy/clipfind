@@ -52,7 +52,19 @@ FOOTAGE_CATEGORIES = [
 ]
 FOOTAGE_CATEGORY_KEYS = {c["key"] for c in FOOTAGE_CATEGORIES}
 
-FOOTAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "footage_library")
+# Render's default web service filesystem is EPHEMERAL — everything
+# written to it is wiped on every deploy and restart. That's invisible
+# for something short-lived (a cut clip a user downloads right after
+# cutting), but this footage library is explicitly meant to persist and
+# get reused across every story generated afterward — a routine redeploy
+# silently wiped an uploaded clip the same day it was added (August
+# 2026), which then surfaced as a confusing "footage no longer
+# available" error on the next video generation. PERSISTENT_DATA_DIR
+# should point at a Render persistent Disk's mount path (e.g. /var/data)
+# once one is attached to the service; falls back to a local folder next
+# to this file so nothing breaks running locally without one configured.
+_DATA_ROOT = os.environ.get("PERSISTENT_DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+FOOTAGE_DIR = os.path.join(_DATA_ROOT, "footage_library")
 os.makedirs(FOOTAGE_DIR, exist_ok=True)
 
 # Background footage just needs to be long enough to cover a handful of
